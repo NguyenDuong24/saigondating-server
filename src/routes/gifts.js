@@ -41,7 +41,7 @@ router.post('/send', async (req, res) => {
     // Check sender balance
     const walletRef = db.collection('users').doc(senderUid).collection('wallet').doc('balance');
     const walletDoc = await walletRef.get();
-    const currentCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
+    const currentCoins = Number(walletDoc.exists ? walletDoc.data().coins || 0 : 0);
 
     if (currentCoins < gift.price) {
       return res.status(400).json({ success: false, error: 'Insufficient balance' });
@@ -206,6 +206,10 @@ router.post('/redeem', async (req, res) => {
     }
 
     const redeemValue = Math.floor(receipt.gift.price * rate);
+
+    if (isNaN(redeemValue) || redeemValue <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid redeem value' });
+    }
 
     // Update receipt and add coins
     const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
