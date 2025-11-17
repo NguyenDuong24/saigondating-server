@@ -179,20 +179,23 @@ router.get('/transactions', async (req, res) => {
     const uid = decodedToken.uid;
 
     const limit = parseInt(req.query.limit) || 50;
-    const offset = parseInt(req.query.offset) || 0;
+    // Note: Removed offset to avoid Firestore index requirements
+    // For pagination, consider cursor-based approach
 
     const transactionsRef = db.collection('transactions')
       .where('uid', '==', uid)
       .orderBy('timestamp', 'desc')
-      .limit(limit)
-      .offset(offset);
+      .limit(limit);
 
     const snapshot = await transactionsRef.get();
-    const transactions = snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data(),
-      timestamp: doc.data().timestamp.toDate()
-    }));
+    const transactions = snapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        ...data,
+        timestamp: data.timestamp ? data.timestamp.toDate() : new Date()
+      };
+    });
 
     res.json({
       success: true,
