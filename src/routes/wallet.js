@@ -183,9 +183,7 @@ router.get('/transactions', async (req, res) => {
     // For pagination, consider cursor-based approach
 
     const transactionsRef = db.collection('transactions')
-      .where('uid', '==', uid)
-      .orderBy('timestamp', 'desc')
-      .limit(limit);
+      .where('uid', '==', uid);
 
     const snapshot = await transactionsRef.get();
     const transactions = snapshot.docs.map(doc => {
@@ -197,10 +195,14 @@ router.get('/transactions', async (req, res) => {
       };
     });
 
+    // Sort in memory since Firestore composite index might not be ready
+    transactions.sort((a, b) => b.timestamp - a.timestamp);
+    const limitedTransactions = transactions.slice(0, limit);
+
     res.json({
       success: true,
-      transactions,
-      count: transactions.length
+      transactions: limitedTransactions,
+      count: limitedTransactions.length
     });
   } catch (error) {
     console.error('Get transactions error:', error);
