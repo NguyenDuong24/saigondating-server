@@ -293,14 +293,14 @@ router.post('/reward', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Ad ID required' });
     }
 
-    // Rate limit: 1 reward per day
-    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-    const rewardRef = db.collection('users').doc(uid).collection('rewards').doc(`gift_${today}`);
-    const rewardDoc = await rewardRef.get();
+    // Rate limit: 1 reward per day (commented out for testing)
+    // const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    // const rewardRef = db.collection('users').doc(uid).collection('rewards').doc(`gift_${today}`);
+    // const rewardDoc = await rewardRef.get();
 
-    if (rewardDoc.exists) {
-      return res.status(429).json({ success: false, error: 'Reward already claimed today' });
-    }
+    // if (rewardDoc.exists) {
+    //   return res.status(429).json({ success: false, error: 'Reward already claimed today' });
+    // }
 
     // Get gift catalog
     const gifts = await getGiftCatalog();
