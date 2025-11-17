@@ -59,7 +59,7 @@ router.post('/send', async (req, res) => {
         type: 'spend',
         amount: gift.price,
         balance: newBalance,
-        timestamp: new Date(),
+        timestamp: Timestamp.fromDate(new Date()),
         metadata: { type: 'gift', giftId, receiverUid, roomId }
       });
 
@@ -197,6 +197,10 @@ router.post('/redeem', async (req, res) => {
     }
 
     const receipt = receiptDoc.data();
+    if (!receipt.gift || typeof receipt.gift.price !== 'number') {
+      return res.status(400).json({ success: false, error: 'Invalid gift data' });
+    }
+
     if (receipt.redeemed) {
       return res.status(400).json({ success: false, error: 'Already redeemed' });
     }
@@ -209,7 +213,7 @@ router.post('/redeem', async (req, res) => {
       // Mark receipt as redeemed
       transaction.update(receiptRef, {
         redeemed: true,
-        redeemedAt: new Date(),
+        redeemedAt: Timestamp.fromDate(new Date()),
         redeemValue
       });
 
@@ -227,7 +231,7 @@ router.post('/redeem', async (req, res) => {
         type: 'topup',
         amount: redeemValue,
         balance: newBalance,
-        timestamp: new Date(),
+        timestamp: Timestamp.fromDate(new Date()),
         metadata: { type: 'gift_redeem', receiptId, giftId: receipt.gift.id }
       });
     });
