@@ -41,7 +41,8 @@ router.post('/send', async (req, res) => {
     // Check sender balance
     const walletRef = db.collection('users').doc(senderUid).collection('wallet').doc('balance');
     const walletDoc = await walletRef.get();
-    const currentCoins = Number(walletDoc.exists ? walletDoc.data().coins || 0 : 0);
+    const rawCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
+    const currentCoins = isNaN(Number(rawCoins)) ? 0 : Number(rawCoins);
 
     if (currentCoins < gift.price) {
       return res.status(400).json({ success: false, error: 'Insufficient balance' });
