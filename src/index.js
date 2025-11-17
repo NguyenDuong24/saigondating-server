@@ -81,6 +81,9 @@ app.get('/health', (req, res) => {
 });
 
 // API routes
+app.use('/api/wallet', require('./routes/wallet'));
+app.use('/api/gifts', require('./routes/gifts'));
+
 app.get('/api', (req, res) => {
   res.json({
     message: 'Saigon Dating Server API',

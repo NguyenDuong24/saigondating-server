@@ -1,0 +1,192 @@
+const express = require('express');
+const { getFirestore } = require('firebase-admin/firestore');
+const { getAuth } = require('firebase-admin/auth');
+
+const router = express.Router();
+const db = getFirestore();
+
+// Import gift catalog from service
+const { getGiftCatalog } = require('../utils/giftHelpers');
+
+// ============== GIFTS ROUTES ==============
+
+/**
+ * POST /gifts/send
+ * Send a gift to another user
+ */
+router.post('/send', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ success: false, error: 'No token provided' });
+    }
+
+    const idToken = authHeader.split('Bearer ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const senderUid = decodedToken.uid;
+
+    const { receiverUid, roomId, giftId, senderName } = req.body;
+
+    if (!receiverUid || !roomId || !giftId || !senderName) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+
+    // Get gift catalog
+    const gifts = await getGiftCatalog();
+    const gift = gifts.find(g => g.id === giftId);
+    if (!gift) {
+      return res.status(400).json({ success: false, error: 'Invalid gift ID' });
+    }
+
+    // Check sender balance
+    const walletRef = db.collection('users').doc(senderUid).collection('wallet').doc('balance');
+    const walletDoc = await walletRef.get();
+    const currentCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
+
+    if (currentCoins < gift.price) {
+      return res.status(400).json({ success: false, error: 'Insufficient balance' });
+    }
+
+    // Deduct coins from sender
+    const newBalance = currentCoins - gift.price;
+    await db.runTransaction(async (transaction) => {
+      transaction.set(walletRef, { coins: newBalance }, { merge: true });
+
+      // Create transaction record
+      const transactionRef = db.collection('transactions').doc();
+      transaction.set(transactionRef, {
+        uid: senderUid,
+        type: 'spend',
+        amount: gift.price,
+        balance: newBalance,
+        timestamp: new Date(),
+        metadata: { type: 'gift', giftId, receiverUid, roomId }
+      });
+
+      // Create gift receipt for receiver
+      const receiptRef = db.collection('users').doc(receiverUid).collection('giftReceipts').doc();
+      transaction.set(receiptRef, {
+        id: receiptRef.id,
+        fromUid: senderUid,
+        fromName: senderName,
+        roomId,
+        gift: { id: gift.id, name: gift.name, price: gift.price, icon: gift.icon },
+        createdAt: new Date(),
+        status: 'unread'
+      });
+
+      // Create gift message in chat
+      const messageRef = db.collection('rooms').doc(roomId).collection('messages').doc();
+      transaction.set(messageRef, {
+        id: messageRef.id,
+        senderId: senderUid,
+        senderName,
+        type: 'gift',
+        gift: { id: gift.id, name: gift.name, price: gift.price, icon: gift.icon },
+        timestamp: new Date(),
+        readBy: {}
+      });
+    });
+
+    // Get updated balance
+    const updatedWallet = await walletRef.get();
+    const finalBalance = updatedWallet.data().coins;
+
+    res.json({
+      success: true,
+      gift,
+      messageId: `gift_${Date.now()}`,
+      receiptId: `receipt_${Date.now()}`,
+      newBalance: finalBalance
+    });
+  } catch (error) {
+    console.error('Send gift error:', error);
+    res.status(500).json({ success: false, error: 'Failed to send gift' });
+  }
+});
+
+/**
+ * POST /gifts/redeem
+ * Redeem a received gift for coins
+ */
+router.post('/redeem', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ success: false, error: 'No token provided' });
+    }
+
+    const idToken = authHeader.split('Bearer ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+
+    const { receiptId, rate = 1 } = req.body;
+
+    if (!receiptId) {
+      return res.status(400).json({ success: false, error: 'Missing receiptId' });
+    }
+
+    if (rate < 0 || rate > 1) {
+      return res.status(400).json({ success: false, error: 'Invalid rate (0-1)' });
+    }
+
+    // Get receipt
+    const receiptRef = db.collection('users').doc(uid).collection('giftReceipts').doc(receiptId);
+    const receiptDoc = await receiptRef.get();
+
+    if (!receiptDoc.exists) {
+      return res.status(404).json({ success: false, error: 'Receipt not found' });
+    }
+
+    const receipt = receiptDoc.data();
+    if (receipt.redeemed) {
+      return res.status(400).json({ success: false, error: 'Already redeemed' });
+    }
+
+    const redeemValue = Math.floor(receipt.gift.price * rate);
+
+    // Update receipt and add coins
+    const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
+    await db.runTransaction(async (transaction) => {
+      // Mark receipt as redeemed
+      transaction.update(receiptRef, {
+        redeemed: true,
+        redeemedAt: new Date(),
+        redeemValue
+      });
+
+      // Add coins to wallet
+      const walletDoc = await transaction.get(walletRef);
+      const currentCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
+      const newBalance = currentCoins + redeemValue;
+
+      transaction.set(walletRef, { coins: newBalance }, { merge: true });
+
+      // Create transaction record
+      const transactionRef = db.collection('transactions').doc();
+      transaction.set(transactionRef, {
+        uid,
+        type: 'topup',
+        amount: redeemValue,
+        balance: newBalance,
+        timestamp: new Date(),
+        metadata: { type: 'gift_redeem', receiptId, giftId: receipt.gift.id }
+      });
+    });
+
+    // Get new balance
+    const updatedWallet = await walletRef.get();
+    const newBalance = updatedWallet.data().coins;
+
+    res.json({
+      success: true,
+      redeemValue,
+      newBalance
+    });
+  } catch (error) {
+    console.error('Redeem gift error:', error);
+    res.status(500).json({ success: false, error: 'Failed to redeem gift' });
+  }
+});
+
+module.exports = router;
