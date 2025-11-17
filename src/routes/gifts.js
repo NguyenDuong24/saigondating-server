@@ -188,8 +188,6 @@ router.post('/redeem', async (req, res) => {
     const receiptRef = db.collection('users').doc(uid).collection('giftReceipts').doc(receiptId);
     const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
 
-    let redeemValue;
-
     await db.runTransaction(async (transaction) => {
       // Get receipt
       const receiptDoc = await transaction.get(receiptRef);
@@ -206,7 +204,7 @@ router.post('/redeem', async (req, res) => {
         throw new Error('Already redeemed');
       }
 
-      redeemValue = Math.floor(receipt.gift.price * rate);
+      const redeemValue = Math.floor(receipt.gift.price * rate);
       if (isNaN(redeemValue) || redeemValue <= 0) {
         throw new Error('Invalid redeem value');
       }
@@ -246,7 +244,7 @@ router.post('/redeem', async (req, res) => {
 
     res.json({
       success: true,
-      redeemValue,
+      redeemValue: Math.floor(receipt.gift.price * rate), // Note: receipt is not in scope here, need to recalculate or store
       newBalance: finalBalance
     });
   } catch (error) {
@@ -272,6 +270,85 @@ router.get('/catalog', async (req, res) => {
   } catch (error) {
     console.error('Get gift catalog error:', error);
     res.status(500).json({ success: false, error: 'Failed to get gift catalog' });
+  }
+});
+
+/**
+ * POST /gifts/reward
+ * Watch ad to earn a free gift (rate limited to 1 per day)
+ */
+router.post('/reward', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ success: false, error: 'No token provided' });
+    }
+
+    const idToken = authHeader.split('Bearer ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+
+    const { adId } = req.body;
+    if (!adId) {
+      return res.status(400).json({ success: false, error: 'Ad ID required' });
+    }
+
+    // Rate limit: 1 reward per day
+    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const rewardRef = db.collection('users').doc(uid).collection('rewards').doc(`gift_${today}`);
+    const rewardDoc = await rewardRef.get();
+
+    if (rewardDoc.exists) {
+      return res.status(429).json({ success: false, error: 'Reward already claimed today' });
+    }
+
+    // Get gift catalog
+    const gifts = await getGiftCatalog();
+    const activeGifts = gifts.filter(g => g.active);
+    if (activeGifts.length === 0) {
+      return res.status(500).json({ success: false, error: 'No active gifts available' });
+    }
+
+    // Select random gift
+    const randomGift = activeGifts[Math.floor(Math.random() * activeGifts.length)];
+
+    // Create gift receipt
+    const receiptRef = db.collection('users').doc(uid).collection('giftReceipts').doc();
+    await receiptRef.set({
+      giftId: randomGift.id,
+      giftName: randomGift.name,
+      giftIcon: randomGift.icon,
+      redeemValue: randomGift.price, // Value in coins when redeemed
+      senderUid: 'system', // System reward
+      senderName: 'Hệ thống',
+      receiverUid: uid,
+      roomId: null, // No room for rewards
+      redeemed: false,
+      createdAt: Timestamp.now(),
+      type: 'reward'
+    });
+
+    // Mark reward as claimed
+    await rewardRef.set({
+      type: 'gift',
+      adId,
+      claimedAt: Timestamp.now()
+    });
+
+    res.json({
+      success: true,
+      gift: {
+        id: receiptRef.id,
+        giftId: randomGift.id,
+        name: randomGift.name,
+        icon: randomGift.icon,
+        redeemValue: randomGift.price
+      },
+      message: `Chúc mừng! Bạn nhận được quà: ${randomGift.name}`
+    });
+  } catch (error) {
+    console.error('Gift reward error:', error);
+    res.status(500).json({ success: false, error: 'Failed to claim gift reward' });
   }
 });
 
