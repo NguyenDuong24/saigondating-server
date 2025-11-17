@@ -121,6 +121,49 @@ router.post('/send', async (req, res) => {
 });
 
 /**
+ * GET /gifts/received
+ * Get received gifts for the authenticated user
+ */
+router.get('/received', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ success: false, error: 'No token provided' });
+    }
+
+    const idToken = authHeader.split('Bearer ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+
+    const { limit = 50, status } = req.query;
+    const limitNum = Math.min(parseInt(limit) || 50, 1000); // Max 1000
+
+    // Get gift receipts
+    const receiptsRef = db.collection('users').doc(uid).collection('giftReceipts');
+    let query = receiptsRef.orderBy('createdAt', 'desc').limit(limitNum);
+
+    if (status) {
+      query = query.where('status', '==', status);
+    }
+
+    const snapshot = await query.get();
+    const gifts = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+
+    res.json({
+      success: true,
+      gifts,
+      count: gifts.length
+    });
+  } catch (error) {
+    console.error('Get received gifts error:', error);
+    res.status(500).json({ success: false, error: 'Failed to get received gifts' });
+  }
+});
+
+/**
  * POST /gifts/redeem
  * Redeem a received gift for coins
  */
