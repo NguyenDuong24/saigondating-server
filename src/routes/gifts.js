@@ -189,4 +189,18 @@ router.post('/redeem', async (req, res) => {
   }
 });
 
+/**
+ * GET /gifts/catalog
+ * Get gift catalog
+ */
+router.get('/catalog', async (req, res) => {
+  try {
+    const gifts = await getGiftCatalog();
+    res.json({ success: true, gifts, count: gifts.length });
+  } catch (error) {
+    console.error('Get gift catalog error:', error);
+    res.status(500).json({ success: false, error: 'Failed to get gift catalog' });
+  }
+});
+
 module.exports = router;
