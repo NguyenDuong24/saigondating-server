@@ -205,4 +205,77 @@ router.get('/transactions', async (req, res) => {
   }
 });
 
+/**
+ * POST /wallet/reward
+ * Reward user with coins for watching an ad
+ */
+router.post('/reward', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ success: false, error: 'No token provided' });
+    }
+
+    const idToken = authHeader.split('Bearer ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+
+    const { amount = 10, adId, metadata = {} } = req.body;
+
+    // Validate amount (fixed reward for now)
+    if (amount !== 10) {
+      return res.status(400).json({ success: false, error: 'Invalid reward amount' });
+    }
+
+    // Simple rate limiting: check last reward within 24 hours
+    const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
+    const walletDoc = await walletRef.get();
+    const walletData = walletDoc.exists ? walletDoc.data() : {};
+    const lastReward = walletData.lastReward ? walletData.lastReward.toDate() : null;
+    const now = new Date();
+    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+    if (lastReward && lastReward > oneDayAgo) {
+      return res.status(429).json({ success: false, error: 'Reward already claimed today. Try again tomorrow.' });
+    }
+
+    // Update balance and last reward
+    await db.runTransaction(async (transaction) => {
+      const walletDoc = await transaction.get(walletRef);
+      const currentCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
+      const newBalance = currentCoins + amount;
+
+      transaction.set(walletRef, { 
+        coins: newBalance, 
+        lastReward: now 
+      }, { merge: true });
+
+      // Create transaction record
+      const transactionRef = db.collection('transactions').doc();
+      transaction.set(transactionRef, {
+        uid,
+        type: 'reward',
+        amount,
+        balance: newBalance,
+        timestamp: now,
+        metadata: { adId, ...metadata }
+      });
+    });
+
+    // Get new balance
+    const updatedWalletDoc = await walletRef.get();
+    const newBalance = updatedWalletDoc.data().coins;
+
+    res.json({
+      success: true,
+      amount,
+      newBalance,
+      transactionId: `reward_${Date.now()}`
+    });
+  } catch (error) {
+    console.error('Reward error:', error);
+    res.status(500).json({ success: false, error: 'Failed to reward' });
+  }
+});
+
 module.exports = router;
