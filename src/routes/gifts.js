@@ -185,48 +185,46 @@ router.post('/redeem', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing receiptId' });
     }
 
-    if (rate < 0 || rate > 1) {
-      return res.status(400).json({ success: false, error: 'Invalid rate (0-1)' });
-    }
-
-    // Get receipt
     const receiptRef = db.collection('users').doc(uid).collection('giftReceipts').doc(receiptId);
-    const receiptDoc = await receiptRef.get();
-
-    if (!receiptDoc.exists) {
-      return res.status(404).json({ success: false, error: 'Receipt not found' });
-    }
-
-    const receipt = receiptDoc.data();
-    if (!receipt.gift || typeof receipt.gift.price !== 'number') {
-      return res.status(400).json({ success: false, error: 'Invalid gift data' });
-    }
-
-    if (receipt.redeemed) {
-      return res.status(400).json({ success: false, error: 'Already redeemed' });
-    }
-
-    const redeemValue = Math.floor(receipt.gift.price * rate);
-
-    if (isNaN(redeemValue) || redeemValue <= 0) {
-      return res.status(400).json({ success: false, error: 'Invalid redeem value' });
-    }
-
-    // Update receipt and add coins
     const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
+
+    let redeemValue;
+
     await db.runTransaction(async (transaction) => {
-      // Mark receipt as redeemed
+      // Get receipt
+      const receiptDoc = await transaction.get(receiptRef);
+      if (!receiptDoc.exists) {
+        throw new Error('Receipt not found');
+      }
+
+      const receipt = receiptDoc.data();
+      if (!receipt.gift || typeof receipt.gift.price !== 'number') {
+        throw new Error('Invalid gift data');
+      }
+
+      if (receipt.redeemed) {
+        throw new Error('Already redeemed');
+      }
+
+      redeemValue = Math.floor(receipt.gift.price * rate);
+      if (isNaN(redeemValue) || redeemValue <= 0) {
+        throw new Error('Invalid redeem value');
+      }
+
+      // Get wallet
+      const walletDoc = await transaction.get(walletRef);
+      const rawCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
+      const currentCoins = isNaN(Number(rawCoins)) ? 0 : Number(rawCoins);
+      const newBalance = currentCoins + redeemValue;
+
+      // Update receipt
       transaction.update(receiptRef, {
         redeemed: true,
         redeemedAt: Timestamp.fromDate(new Date()),
         redeemValue
       });
 
-      // Add coins to wallet
-      const walletDoc = await transaction.get(walletRef);
-      const currentCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
-      const newBalance = currentCoins + redeemValue;
-
+      // Update wallet
       transaction.set(walletRef, { coins: newBalance }, { merge: true });
 
       // Create transaction record
@@ -241,17 +239,24 @@ router.post('/redeem', async (req, res) => {
       });
     });
 
-    // Get new balance
+    // Get updated balance
     const updatedWallet = await walletRef.get();
-    const newBalance = updatedWallet.data().coins;
+    const rawUpdated = updatedWallet.exists ? updatedWallet.data().coins || 0 : 0;
+    const finalBalance = isNaN(Number(rawUpdated)) ? 0 : Number(rawUpdated);
 
     res.json({
       success: true,
       redeemValue,
-      newBalance
+      newBalance: finalBalance
     });
   } catch (error) {
-    console.error('Redeem gift error:', error);
+    console.error('Redeem gift error:', error.message, error.stack);
+    if (error.message === 'Receipt not found') {
+      return res.status(404).json({ success: false, error: 'Receipt not found' });
+    }
+    if (error.message === 'Invalid gift data' || error.message === 'Already redeemed' || error.message === 'Invalid redeem value') {
+      return res.status(400).json({ success: false, error: error.message });
+    }
     res.status(500).json({ success: false, error: 'Failed to redeem gift' });
   }
 });
