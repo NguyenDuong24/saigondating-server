@@ -1,5 +1,5 @@
 const express = require('express');
-const { getFirestore } = require('firebase-admin/firestore');
+const { getFirestore, Timestamp, FieldValue } = require('firebase-admin/firestore');
 const { getAuth } = require('firebase-admin/auth');
 
 const router = express.Router();
@@ -71,7 +71,7 @@ router.post('/send', async (req, res) => {
         fromName: senderName,
         roomId,
         gift: { id: gift.id, name: gift.name, price: gift.price, icon: gift.icon },
-        createdAt: new Date(),
+        createdAt: Timestamp.fromDate(new Date()),
         status: 'unread'
       });
 
@@ -79,12 +79,27 @@ router.post('/send', async (req, res) => {
       const messageRef = db.collection('rooms').doc(roomId).collection('messages').doc();
       transaction.set(messageRef, {
         id: messageRef.id,
-        senderId: senderUid,
+        uid: senderUid,
         senderName,
         type: 'gift',
         gift: { id: gift.id, name: gift.name, price: gift.price, icon: gift.icon },
-        timestamp: new Date(),
-        readBy: {}
+        createdAt: Timestamp.fromDate(new Date()),
+        readBy: [],
+        status: 'sent'
+      });
+
+      // Update room metadata
+      const roomRef = db.collection('rooms').doc(roomId);
+      transaction.update(roomRef, {
+        lastMessage: { 
+          type: 'gift',
+          gift: { id: gift.id, name: gift.name, price: gift.price, icon: gift.icon },
+          createdAt: Timestamp.fromDate(new Date()),
+          uid: senderUid,
+          status: 'sent'
+        },
+        updatedAt: Timestamp.fromDate(new Date()),
+        [`unreadCounts.${receiverUid}`]: FieldValue.increment(1)
       });
     });
 
