@@ -233,6 +233,8 @@ router.post('/reward', async (req, res) => {
     }
 
     // Simple rate limiting: check last reward within 24 hours
+    // COMMENTED OUT FOR TESTING - REMOVE IN PRODUCTION
+    /*
     const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
     const walletDoc = await walletRef.get();
     const walletData = walletDoc.exists ? walletDoc.data() : {};
@@ -243,6 +245,7 @@ router.post('/reward', async (req, res) => {
     if (lastReward && lastReward > oneDayAgo) {
       return res.status(429).json({ success: false, error: 'Reward already claimed today. Try again tomorrow.' });
     }
+    */
 
     // Update balance and last reward
     await db.runTransaction(async (transaction) => {
@@ -251,8 +254,8 @@ router.post('/reward', async (req, res) => {
       const newBalance = currentCoins + amount;
 
       transaction.set(walletRef, { 
-        coins: newBalance, 
-        lastReward: now 
+        coins: newBalance
+        // lastReward: now  // Commented out for testing
       }, { merge: true });
 
       // Create transaction record
