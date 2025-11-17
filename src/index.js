@@ -10,6 +10,20 @@ require('dotenv').config();
 const admin = require('firebase-admin');
 
 // Use environment variables for Firebase credentials
+const requiredEnvVars = [
+  'FIREBASE_PROJECT_ID',
+  'FIREBASE_PRIVATE_KEY_ID',
+  'FIREBASE_PRIVATE_KEY',
+  'FIREBASE_CLIENT_EMAIL',
+  'FIREBASE_CLIENT_ID'
+];
+
+for (const envVar of requiredEnvVars) {
+  if (!process.env[envVar]) {
+    throw new Error(`Environment variable ${envVar} is required but not set`);
+  }
+}
+
 const serviceAccount = {
   type: "service_account",
   project_id: process.env.FIREBASE_PROJECT_ID,
