@@ -226,6 +226,11 @@ router.post('/reward', async (req, res) => {
     const uid = decodedToken.uid;
 
     const { amount = 10, adId, metadata = {} } = req.body;
+    console.log('[WALLET REWARD] Request:', { uid, amount, adId, metadata });
+
+    // Ensure wallet reference and a timestamp are available
+    const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
+    const now = new Date();
 
     // Validate amount (fixed reward for now)
     if (amount !== 10) {
@@ -235,7 +240,6 @@ router.post('/reward', async (req, res) => {
     // Simple rate limiting: check last reward within 24 hours
     // COMMENTED OUT FOR TESTING - REMOVE IN PRODUCTION
     /*
-    const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
     const walletDoc = await walletRef.get();
     const walletData = walletDoc.exists ? walletDoc.data() : {};
     const lastReward = walletData.lastReward ? walletData.lastReward.toDate() : null;
@@ -248,31 +252,38 @@ router.post('/reward', async (req, res) => {
     */
 
     // Update balance and last reward
-    await db.runTransaction(async (transaction) => {
-      const walletDoc = await transaction.get(walletRef);
-      const currentCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
-      const newBalance = currentCoins + amount;
+    console.log('[WALLET REWARD] Running transaction for uid:', uid);
+    try {
+      await db.runTransaction(async (transaction) => {
+        const walletDoc = await transaction.get(walletRef);
+        const currentCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
+        const newBalance = currentCoins + amount;
 
-      transaction.set(walletRef, { 
-        coins: newBalance
-        // lastReward: now  // Commented out for testing
-      }, { merge: true });
+        transaction.set(walletRef, { 
+          coins: newBalance
+          // lastReward: now  // Commented out for testing
+        }, { merge: true });
 
-      // Create transaction record
-      const transactionRef = db.collection('transactions').doc();
-      transaction.set(transactionRef, {
-        uid,
-        type: 'reward',
-        amount,
-        balance: newBalance,
-        timestamp: now,
-        metadata: { adId, ...metadata }
+        // Create transaction record
+        const transactionRef = db.collection('transactions').doc();
+        transaction.set(transactionRef, {
+          uid,
+          type: 'reward',
+          amount,
+          balance: newBalance,
+          timestamp: now,
+          metadata: { adId, ...metadata }
+        });
       });
-    });
+    } catch (txErr) {
+      console.error('[WALLET REWARD] Transaction failed:', txErr, txErr.stack);
+      return res.status(500).json({ success: false, error: txErr.message || 'Transaction failed' });
+    }
 
     // Get new balance
     const updatedWalletDoc = await walletRef.get();
-    const newBalance = updatedWalletDoc.data().coins;
+    const newBalance = updatedWalletDoc.exists ? (updatedWalletDoc.data().coins || 0) : 0;
+    console.log('[WALLET REWARD] Updated balance for', uid, '=>', newBalance);
 
     res.json({
       success: true,
@@ -281,8 +292,13 @@ router.post('/reward', async (req, res) => {
       transactionId: `reward_${Date.now()}`
     });
   } catch (error) {
-    console.error('Reward error:', error);
-    res.status(500).json({ success: false, error: 'Failed to reward' });
+    console.error('Reward error:', error, error.stack);
+    const msg = error && error.message ? error.message : 'Failed to reward';
+    // Expose message for easier debugging in development
+    if (process.env.NODE_ENV === 'development') {
+      return res.status(500).json({ success: false, error: msg, details: error.stack });
+    }
+    return res.status(500).json({ success: false, error: msg });
   }
 });
 
