@@ -312,6 +312,9 @@ router.post('/reward', async (req, res) => {
     // Select random gift
     const randomGift = activeGifts[Math.floor(Math.random() * activeGifts.length)];
 
+    // Create reward record ID and gift receipt
+    const rewardRef = db.collection('users').doc(uid).collection('rewards').doc(`gift_${Date.now()}`);
+    console.log('[GIFT REWARD] Creating gift receipt and reward record for uid:', uid);
     // Create gift receipt
     const receiptRef = db.collection('users').doc(uid).collection('giftReceipts').doc();
     await receiptRef.set({

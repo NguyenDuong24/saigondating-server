@@ -1,5 +1,5 @@
 const express = require('express');
-const { getFirestore } = require('firebase-admin/firestore');
+const { getFirestore, Timestamp } = require('firebase-admin/firestore');
 const { getAuth } = require('firebase-admin/auth');
 
 const router = express.Router();
@@ -19,8 +19,15 @@ router.get('/balance', async (req, res) => {
     }
 
     const idToken = authHeader.split('Bearer ')[1];
-    const decodedToken = await getAuth().verifyIdToken(idToken);
+    let decodedToken;
+    try {
+      decodedToken = await getAuth().verifyIdToken(idToken);
+    } catch (verifyError) {
+      console.error('[WALLET] verifyIdToken failed:', verifyError);
+      return res.status(401).json({ success: false, error: 'Invalid auth token' });
+    }
     const uid = decodedToken.uid;
+    console.log('[WALLET] Authenticated uid:', uid);
 
     // Get user wallet
     const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
@@ -54,8 +61,15 @@ router.post('/topup', async (req, res) => {
     }
 
     const idToken = authHeader.split('Bearer ')[1];
-    const decodedToken = await getAuth().verifyIdToken(idToken);
+    let decodedToken;
+    try {
+      decodedToken = await getAuth().verifyIdToken(idToken);
+    } catch (verifyError) {
+      console.error('[WALLET] verifyIdToken failed:', verifyError);
+      return res.status(401).json({ success: false, error: 'Invalid auth token' });
+    }
     const uid = decodedToken.uid;
+    console.log('[WALLET] Authenticated uid:', uid);
 
     const { amount, metadata = {} } = req.body;
 
@@ -65,28 +79,31 @@ router.post('/topup', async (req, res) => {
 
     // Update balance
     const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
+    console.log('[WALLET TOPUP] uid:', uid, 'amount:', amount);
+    let transactionRef;
     await db.runTransaction(async (transaction) => {
       const walletDoc = await transaction.get(walletRef);
-      const currentCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
-      const newBalance = currentCoins + amount;
+      const rawCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
+      const currentCoins = isNaN(Number(rawCoins)) ? 0 : Number(rawCoins);
+      const newBalance = currentCoins + Number(amount);
 
       transaction.set(walletRef, { coins: newBalance }, { merge: true });
 
       // Create transaction record
-      const transactionRef = db.collection('transactions').doc();
+      transactionRef = db.collection('transactions').doc();
       transaction.set(transactionRef, {
         uid,
         type: 'topup',
         amount,
         balance: newBalance,
-        timestamp: new Date(),
+        timestamp: Timestamp.now(),
         metadata
       });
     });
 
-    // Get new balance
+    // Get new balance (safe access)
     const walletDoc = await walletRef.get();
-    const newBalance = walletDoc.data().coins;
+    const newBalance = walletDoc.exists ? (walletDoc.data().coins || 0) : 0;
 
     res.json({
       success: true,
@@ -112,8 +129,15 @@ router.post('/spend', async (req, res) => {
     }
 
     const idToken = authHeader.split('Bearer ')[1];
-    const decodedToken = await getAuth().verifyIdToken(idToken);
+    let decodedToken;
+    try {
+      decodedToken = await getAuth().verifyIdToken(idToken);
+    } catch (verifyError) {
+      console.error('[WALLET] verifyIdToken failed:', verifyError);
+      return res.status(401).json({ success: false, error: 'Invalid auth token' });
+    }
     const uid = decodedToken.uid;
+    console.log('[WALLET] Authenticated uid:', uid);
 
     const { amount, metadata = {} } = req.body;
 
@@ -127,13 +151,14 @@ router.post('/spend', async (req, res) => {
 
     await db.runTransaction(async (transaction) => {
       const walletDoc = await transaction.get(walletRef);
-      const currentCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
+      const rawCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
+      const currentCoins = isNaN(Number(rawCoins)) ? 0 : Number(rawCoins);
 
-      if (currentCoins < amount) {
+      if (currentCoins < Number(amount)) {
         throw new Error('Insufficient balance');
       }
 
-      newBalance = currentCoins - amount;
+      newBalance = currentCoins - Number(amount);
       transaction.set(walletRef, { coins: newBalance }, { merge: true });
 
       // Create transaction record
@@ -143,7 +168,7 @@ router.post('/spend', async (req, res) => {
         type: 'spend',
         amount,
         balance: newBalance,
-        timestamp: new Date(),
+        timestamp: Timestamp.now(),
         metadata
       });
     });
@@ -175,8 +200,15 @@ router.get('/transactions', async (req, res) => {
     }
 
     const idToken = authHeader.split('Bearer ')[1];
-    const decodedToken = await getAuth().verifyIdToken(idToken);
+    let decodedToken;
+    try {
+      decodedToken = await getAuth().verifyIdToken(idToken);
+    } catch (verifyError) {
+      console.error('[WALLET] verifyIdToken failed:', verifyError);
+      return res.status(401).json({ success: false, error: 'Invalid auth token' });
+    }
     const uid = decodedToken.uid;
+    console.log('[WALLET] Authenticated uid:', uid);
 
     const limit = parseInt(req.query.limit) || 50;
     // Note: Removed offset to avoid Firestore index requirements
@@ -222,15 +254,36 @@ router.post('/reward', async (req, res) => {
     }
 
     const idToken = authHeader.split('Bearer ')[1];
-    const decodedToken = await getAuth().verifyIdToken(idToken);
+    let decodedToken;
+    try {
+      decodedToken = await getAuth().verifyIdToken(idToken);
+    } catch (verifyError) {
+      console.error('[WALLET] verifyIdToken failed:', verifyError);
+      return res.status(401).json({ success: false, error: 'Invalid auth token' });
+    }
     const uid = decodedToken.uid;
+    console.log('[WALLET] Authenticated uid:', uid);
 
-    const { amount = 10, adId, metadata = {} } = req.body;
+    let { amount = 10, adId, metadata = {} } = req.body;
     console.log('[WALLET REWARD] Request:', { uid, amount, adId, metadata });
+
+    // Validate amount and metadata
+    amount = Number(amount);
+    if (isNaN(amount) || amount <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid amount' });
+    }
+    if (typeof metadata !== 'object' || metadata === null) {
+      // Try to parse if it's a JSON string
+      try {
+        metadata = JSON.parse(metadata || '{}');
+      } catch (e) {
+        metadata = {};
+      }
+    }
 
     // Ensure wallet reference and a timestamp are available
     const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
-    const now = new Date();
+    const nowTimestamp = Timestamp.now();
 
     // Validate amount (fixed reward for now)
     if (amount !== 10) {
@@ -252,26 +305,27 @@ router.post('/reward', async (req, res) => {
     */
 
     // Update balance and last reward
-    console.log('[WALLET REWARD] Running transaction for uid:', uid);
+    console.log('[WALLET REWARD] Running transaction for uid:', uid, 'amount:', amount);
     try {
+      const transactionRef = db.collection('transactions').doc();
       await db.runTransaction(async (transaction) => {
         const walletDoc = await transaction.get(walletRef);
         const currentCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
         const newBalance = currentCoins + amount;
+        console.log('[WALLET REWARD] Current coins:', currentCoins, 'New balance:', newBalance);
 
         transaction.set(walletRef, { 
-          coins: newBalance
-          // lastReward: now  // Commented out for testing
+          coins: newBalance,
+          lastReward: nowTimestamp
         }, { merge: true });
 
         // Create transaction record
-        const transactionRef = db.collection('transactions').doc();
         transaction.set(transactionRef, {
           uid,
           type: 'reward',
           amount,
           balance: newBalance,
-          timestamp: now,
+          timestamp: nowTimestamp,
           metadata: { adId, ...metadata }
         });
       });
@@ -283,13 +337,13 @@ router.post('/reward', async (req, res) => {
     // Get new balance
     const updatedWalletDoc = await walletRef.get();
     const newBalance = updatedWalletDoc.exists ? (updatedWalletDoc.data().coins || 0) : 0;
-    console.log('[WALLET REWARD] Updated balance for', uid, '=>', newBalance);
+    console.log('[WALLET REWARD] Updated balance for', uid, '=>', newBalance, 'txId:', transactionRef?.id);
 
     res.json({
       success: true,
       amount,
       newBalance,
-      transactionId: `reward_${Date.now()}`
+      transactionId: transactionRef?.id || `reward_${Date.now()}`
     });
   } catch (error) {
     console.error('Reward error:', error, error.stack);
