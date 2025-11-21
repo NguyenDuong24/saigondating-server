@@ -306,8 +306,9 @@ router.post('/reward', async (req, res) => {
 
     // Update balance and last reward
     console.log('[WALLET REWARD] Running transaction for uid:', uid, 'amount:', amount);
+    let transactionRef;
     try {
-      const transactionRef = db.collection('transactions').doc();
+      transactionRef = db.collection('transactions').doc();
       await db.runTransaction(async (transaction) => {
         const walletDoc = await transaction.get(walletRef);
         const currentCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
