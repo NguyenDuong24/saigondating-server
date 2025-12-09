@@ -83,6 +83,8 @@ app.get('/health', (req, res) => {
 // API routes
 app.use('/api/wallet', require('./routes/wallet'));
 app.use('/api/gifts', require('./routes/gifts'));
+app.use('/api/momo', require('./routes/momo'));
+app.use('/api/user', require('./routes/user'));
 
 app.get('/api', (req, res) => {
   res.json({
