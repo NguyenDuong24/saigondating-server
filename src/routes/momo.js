@@ -229,7 +229,13 @@ router.post('/create-payment', async (req, res) => {
             momoQrCodeUrl: momoResponse.qrCodeUrl,
         });
 
-        console.log('✅ [MOMO] Payment created:', { orderId, amount, purchaseType });
+        console.log('✅ [MOMO] Payment created:', {
+            orderId,
+            amount,
+            purchaseType,
+            payUrl: momoResponse.payUrl,
+            deeplink: momoResponse.deeplink
+        });
 
         res.json({
             success: true,
