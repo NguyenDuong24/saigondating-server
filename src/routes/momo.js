@@ -167,9 +167,14 @@ router.post('/create-payment', async (req, res) => {
             });
         }
 
-        // Tạo order ID unique
-        const orderId = `CHAPPAT_${uid.substring(0, 8)}_${Date.now()}`;
-        const requestId = `REQ_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+        // Tạo order ID unique - Thêm random string để tránh trùng lặp trong Sandbox
+        // Format: PARTNER_USER_TIMESTAMP_RANDOM
+        const shortUid = uid.substring(0, 6);
+        const timestamp = Date.now();
+        const random = Math.floor(Math.random() * 10000);
+        const orderId = `CHAPPAT_${shortUid}_${timestamp}_${random}`;
+
+        const requestId = orderId; // Dùng luôn orderId làm requestId cho đồng bộ
 
         // Extra data để lưu thông tin thanh toán
         const extraData = Buffer.from(JSON.stringify({
@@ -180,12 +185,20 @@ router.post('/create-payment', async (req, res) => {
             packageId: packageId || null,
         })).toString('base64');
 
+        // Sanitize orderInfo to ASCII to avoid signature issues
+        // Loại bỏ dấu tiếng Việt
+        const sanitizeString = (str) => {
+            return str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").replace(/Đ/g, "D");
+        };
+
+        const safeOrderInfo = sanitizeString(orderInfo || `Thanh toan ChappAt - ${orderId}`);
+
         // Gọi MoMo API
         const momoResponse = await createMoMoPayment({
             orderId,
             requestId,
             amount,
-            orderDescription: orderInfo || `Thanh toán ChappAt - ${orderId}`,
+            orderDescription: safeOrderInfo,
             extraData,
         });
 
@@ -195,6 +208,7 @@ router.post('/create-payment', async (req, res) => {
                 success: false,
                 error: momoResponse.message || 'Lỗi tạo thanh toán MoMo',
                 code: 'MOMO_ERROR',
+                detail: momoResponse
             });
         }
 
