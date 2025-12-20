@@ -40,7 +40,6 @@ const serviceAccount = {
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  // Add your Firebase project config here if needed
 });
 
 const app = express();
@@ -71,6 +70,22 @@ app.use(morgan('combined'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// Import routes
+const walletRoutes = require('./routes/wallet');
+const giftRoutes = require('./routes/gifts');
+const shopRoutes = require('./routes/shop');
+const userRoutes = require('./routes/user');
+const videosdkRoutes = require('./routes/videosdk');
+const momoRoutes = require('./routes/momo');
+
+// Register routes
+app.use('/api/wallet', walletRoutes);
+app.use('/api/gifts', giftRoutes);
+app.use('/api/shop', shopRoutes);
+app.use('/api/user', userRoutes);
+app.use('/api/videosdk', videosdkRoutes);
+app.use('/api/momo', momoRoutes);
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({
@@ -80,17 +95,11 @@ app.get('/health', (req, res) => {
   });
 });
 
-// API routes
-app.use('/api/wallet', require('./routes/wallet'));
-app.use('/api/gifts', require('./routes/gifts'));
-app.use('/api/momo', require('./routes/momo'));
-app.use('/api/user', require('./routes/user'));
-
-app.get('/api', (req, res) => {
-  res.json({
-    message: 'Saigon Dating Server API',
-    version: '1.0.0',
-    status: 'running'
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({
+    error: 'Not Found',
+    message: `Route ${req.originalUrl} not found`
   });
 });
 
@@ -100,14 +109,6 @@ app.use((err, req, res, next) => {
   res.status(500).json({
     error: 'Something went wrong!',
     message: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
-  });
-});
-
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({
-    error: 'Not Found',
-    message: `Route ${req.originalUrl} not found`
   });
 });
 

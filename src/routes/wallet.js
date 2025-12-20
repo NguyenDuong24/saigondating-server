@@ -77,6 +77,15 @@ router.post('/topup', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid amount (1-1000)' });
     }
 
+    // SECURITY: Only allow manual topup in Development environment
+    if (process.env.NODE_ENV !== 'development') {
+      console.warn('[SECURITY] Blocked attempt to use manual topup in production from uid:', uid);
+      return res.status(403).json({
+        success: false,
+        error: 'Manual topup is disabled in production. Please use official payment methods.'
+      });
+    }
+
     // Update balance
     const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
     console.log('[WALLET TOPUP] uid:', uid, 'amount:', amount);
@@ -291,8 +300,6 @@ router.post('/reward', async (req, res) => {
     }
 
     // Simple rate limiting: check last reward within 24 hours
-    // COMMENTED OUT FOR TESTING - REMOVE IN PRODUCTION
-    /*
     const walletDoc = await walletRef.get();
     const walletData = walletDoc.exists ? walletDoc.data() : {};
     const lastReward = walletData.lastReward ? walletData.lastReward.toDate() : null;
@@ -302,7 +309,6 @@ router.post('/reward', async (req, res) => {
     if (lastReward && lastReward > oneDayAgo) {
       return res.status(429).json({ success: false, error: 'Reward already claimed today. Try again tomorrow.' });
     }
-    */
 
     // Update balance and last reward
     console.log('[WALLET REWARD] Running transaction for uid:', uid, 'amount:', amount);
@@ -315,7 +321,7 @@ router.post('/reward', async (req, res) => {
         const newBalance = currentCoins + amount;
         console.log('[WALLET REWARD] Current coins:', currentCoins, 'New balance:', newBalance);
 
-        transaction.set(walletRef, { 
+        transaction.set(walletRef, {
           coins: newBalance,
           lastReward: nowTimestamp
         }, { merge: true });
