@@ -86,14 +86,13 @@ async function createMoMoPayment(orderInfo) {
     // Tạo raw signature
     const rawSignature = `accessKey=${MOMO_CONFIG.accessKey}&amount=${amount}&extraData=${extraData}&ipnUrl=${MOMO_CONFIG.ipnUrl}&orderId=${orderId}&orderInfo=${orderDescription}&partnerCode=${MOMO_CONFIG.partnerCode}&redirectUrl=${MOMO_CONFIG.redirectUrl}&requestId=${requestId}&requestType=${MOMO_CONFIG.requestType}`;
 
+    console.log('🔑 [MOMO] Raw Signature:', rawSignature);
     const signature = createSignature(rawSignature);
 
     const requestBody = {
         partnerCode: MOMO_CONFIG.partnerCode,
-        partnerName: 'ChappAt',
-        storeId: 'ChappAtStore',
         requestId: requestId,
-        amount: amount,
+        amount: parseInt(amount),
         orderId: orderId,
         orderInfo: orderDescription,
         redirectUrl: MOMO_CONFIG.redirectUrl,
@@ -174,12 +173,11 @@ router.post('/create-payment', async (req, res) => {
             });
         }
 
-        // Tạo order ID unique - Thêm random string để tránh trùng lặp trong Sandbox
-        // Format: PARTNER_USER_TIMESTAMP_RANDOM
-        const shortUid = uid.substring(0, 6);
-        const timestamp = Date.now();
-        const random = Math.floor(Math.random() * 10000);
-        const orderId = `CHAPPAT_${shortUid}_${timestamp}_${random}`;
+        // Tạo order ID unique - Dùng format đơn giản hơn (chỉ chữ và số)
+        const shortUid = uid.substring(0, 4);
+        const timestamp = Math.floor(Date.now() / 1000);
+        const random = Math.floor(Math.random() * 1000);
+        const orderId = `CP${shortUid}${timestamp}${random}`;
 
         const requestId = orderId; // Dùng luôn orderId làm requestId cho đồng bộ
 
