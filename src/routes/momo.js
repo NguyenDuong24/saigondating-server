@@ -22,9 +22,9 @@ const MOMO_CONFIG = {
     // Sandbox URLs (đổi sang production khi go-live)
     endpoint: process.env.MOMO_ENDPOINT || 'https://test-payment.momo.vn/v2/gateway/api/create',
 
-    // Callback URLs
-    redirectUrl: process.env.MOMO_REDIRECT_URL || 'chappat://payment-result',
-    ipnUrl: process.env.MOMO_IPN_URL || 'https://saigondating-server.onrender.com/api/momo/callback',
+    // Callback URLs - Tạm thời dùng URL chuẩn để debug Code 99
+    redirectUrl: process.env.MOMO_REDIRECT_URL || 'https://momo.vn',
+    ipnUrl: process.env.MOMO_IPN_URL || 'https://webhook.site/b3b3b3b3-b3b3-4b3b-b3b3-b3b3b3b3b3b3',
 
     requestType: 'captureWallet',
 };
@@ -97,13 +97,15 @@ async function createMoMoPayment(orderInfo) {
         orderInfo: orderDescription,
         redirectUrl: MOMO_CONFIG.redirectUrl,
         ipnUrl: MOMO_CONFIG.ipnUrl,
-        lang: 'vi',
         extraData: extraData,
         requestType: MOMO_CONFIG.requestType,
         signature: signature,
+        lang: 'vi'
     };
 
-    console.log('📤 [MOMO] Request:', {
+    console.log('� [MOMO] Full Request Body:', JSON.stringify(requestBody, null, 2));
+
+    console.log('�📤 [MOMO] Request:', {
         orderId,
         amount,
         endpoint: MOMO_CONFIG.endpoint,
@@ -156,11 +158,11 @@ router.post('/create-payment', async (req, res) => {
             duration,     // Số ngày pro (nếu purchaseType = 'pro')
         } = req.body;
 
-        // Validate
-        if (!amount || amount < 1000) {
+        // Validate - Tạm thời cho phép amount test
+        if (!amount) {
             return res.status(400).json({
                 success: false,
-                error: 'Số tiền không hợp lệ (tối thiểu 1,000đ)',
+                error: 'Số tiền không hợp lệ',
                 code: 'INVALID_AMOUNT',
             });
         }
@@ -173,22 +175,12 @@ router.post('/create-payment', async (req, res) => {
             });
         }
 
-        // Tạo order ID unique - Dùng format đơn giản hơn (chỉ chữ và số)
-        const shortUid = uid.substring(0, 4);
-        const timestamp = Math.floor(Date.now() / 1000);
-        const random = Math.floor(Math.random() * 1000);
-        const orderId = `CP${shortUid}${timestamp}${random}`;
+        // Tạo order ID cực kỳ đơn giản
+        const orderId = 'TR' + Math.floor(Math.random() * 1000000000);
+        const requestId = orderId;
 
-        const requestId = orderId; // Dùng luôn orderId làm requestId cho đồng bộ
-
-        // Extra data để lưu thông tin thanh toán
-        const extraData = Buffer.from(JSON.stringify({
-            uid,
-            purchaseType,
-            coinAmount: coinAmount || 0,
-            duration: duration || 0,
-            packageId: packageId || null,
-        })).toString('base64');
+        // Extra data - Tạm thời để trống để debug Code 99
+        const extraData = "";
 
         // Sanitize orderInfo to ASCII to avoid signature issues
         // Loại bỏ dấu tiếng Việt
@@ -196,7 +188,7 @@ router.post('/create-payment', async (req, res) => {
             return str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").replace(/Đ/g, "D");
         };
 
-        const safeOrderInfo = sanitizeString(orderInfo || `Thanh toan ChappAt - ${orderId}`);
+        const safeOrderInfo = "Thanh toan ChappAt";
 
         // Gọi MoMo API
         const momoResponse = await createMoMoPayment({
