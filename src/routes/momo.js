@@ -123,7 +123,14 @@ async function createMoMoPayment(orderInfo) {
     console.log('📥 [MOMO] Response:', {
         resultCode: data.resultCode,
         message: data.message,
+        orderId: data.orderId,
+        requestId: data.requestId,
+        responseTime: data.responseTime,
     });
+
+    if (data.resultCode !== 0) {
+        console.error('❌ [MOMO] API Error Detail:', data);
+    }
 
     return data;
 }
@@ -203,12 +210,13 @@ router.post('/create-payment', async (req, res) => {
         });
 
         if (momoResponse.resultCode !== 0) {
-            console.error('❌ [MOMO] Error:', momoResponse);
+            console.error('❌ [MOMO] Create Payment Failed:', momoResponse);
             return res.status(400).json({
                 success: false,
                 error: momoResponse.message || 'Lỗi tạo thanh toán MoMo',
                 code: 'MOMO_ERROR',
-                detail: momoResponse
+                detail: momoResponse,
+                momoResultCode: momoResponse.resultCode
             });
         }
 
