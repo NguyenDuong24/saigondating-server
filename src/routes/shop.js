@@ -24,10 +24,12 @@ router.get('/items', async (req, res) => {
         // If no items, return some default ones for demo/initial setup
         if (items.length === 0) {
             const defaultItems = [
-                { id: 'vip_badge', name: 'Huy hiệu VIP', price: 500, emoji: '💎', description: 'Hiển thị huy hiệu VIP trên hồ sơ của bạn' },
-                { id: 'extra_likes', name: 'Thêm 50 lượt thích', price: 200, emoji: '❤️', description: 'Tăng giới hạn lượt thích hàng ngày' },
+                { id: 'vip_badge', name: 'Huy hiệu VIP', price: 500, emoji: '💎', description: 'Hiển thị huy hiệu VIP trên hồ sơ và mở khóa tính năng Pro trong 30 ngày' },
+                { id: 'extra_likes', name: 'Thêm 50 lượt thích', price: 200, emoji: '❤️', description: 'Tăng giới hạn lượt thích hàng ngày của bạn' },
                 { id: 'profile_boost', name: 'Đẩy hồ sơ', price: 300, emoji: '🚀', description: 'Hồ sơ của bạn sẽ được ưu tiên hiển thị trong 24h' },
                 { id: 'custom_theme', name: 'Giao diện đặc biệt', price: 1000, emoji: '🎨', description: 'Mở khóa giao diện tùy chỉnh cho ứng dụng' },
+                { id: 'incognito_mode', name: 'Chế độ ẩn danh', price: 800, emoji: '🕵️', description: 'Xem hồ sơ người khác mà không để lại dấu vết' },
+                { id: 'super_like_pack', name: 'Gói 10 Super Like', price: 400, emoji: '⭐', description: 'Gây ấn tượng mạnh với người bạn thích' },
             ];
             return res.json({ success: true, items: defaultItems, count: defaultItems.length });
         }
@@ -97,6 +99,8 @@ router.post('/purchase', async (req, res) => {
                 'extra_likes': { name: 'Thêm 50 lượt thích', price: 200 },
                 'profile_boost': { name: 'Đẩy hồ sơ', price: 300 },
                 'custom_theme': { name: 'Giao diện đặc biệt', price: 1000 },
+                'incognito_mode': { name: 'Chế độ ẩn danh', price: 800 },
+                'super_like_pack': { name: 'Gói 10 Super Like', price: 400 },
             };
             item = defaultItems[itemId];
             if (!item) {
@@ -140,6 +144,24 @@ router.post('/purchase', async (req, res) => {
                 price: item.price,
                 purchasedAt: Timestamp.now(),
             });
+
+            // Apply item effects
+            const userRef = db.collection('users').doc(uid);
+            if (itemId === 'vip_badge') {
+                const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+                const expiresAt = new Date(Date.now() + thirtyDays);
+                transaction.update(userRef, {
+                    isPro: true,
+                    proExpiresAt: Timestamp.fromDate(expiresAt),
+                    vipBadge: true
+                });
+            } else if (itemId === 'profile_boost') {
+                const twentyFourHours = 24 * 60 * 60 * 1000;
+                const expiresAt = new Date(Date.now() + twentyFourHours);
+                transaction.update(userRef, {
+                    boostedUntil: Timestamp.fromDate(expiresAt)
+                });
+            }
 
             // Create transaction record
             const transactionRef = db.collection('transactions').doc();
