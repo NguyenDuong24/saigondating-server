@@ -83,29 +83,33 @@ async function createMoMoPayment(orderInfo) {
         extraData,
     } = orderInfo;
 
+    const amountStr = amount.toString();
+
     // Tạo raw signature
-    const rawSignature = `accessKey=${MOMO_CONFIG.accessKey}&amount=${amount}&extraData=${extraData}&ipnUrl=${MOMO_CONFIG.ipnUrl}&orderId=${orderId}&orderInfo=${orderDescription}&partnerCode=${MOMO_CONFIG.partnerCode}&redirectUrl=${MOMO_CONFIG.redirectUrl}&requestId=${requestId}&requestType=${MOMO_CONFIG.requestType}`;
+    const rawSignature = `accessKey=${MOMO_CONFIG.accessKey}&amount=${amountStr}&extraData=${extraData}&ipnUrl=${MOMO_CONFIG.ipnUrl}&orderId=${orderId}&orderInfo=${orderDescription}&partnerCode=${MOMO_CONFIG.partnerCode}&redirectUrl=${MOMO_CONFIG.redirectUrl}&requestId=${requestId}&requestType=${MOMO_CONFIG.requestType}`;
 
     console.log('🔑 [MOMO] Raw Signature:', rawSignature);
     const signature = createSignature(rawSignature);
 
     const requestBody = {
         partnerCode: MOMO_CONFIG.partnerCode,
+        partnerName: 'ChappAt',
+        storeId: 'ChappAtStore',
         requestId: requestId,
-        amount: parseInt(amount),
+        amount: parseInt(amountStr),
         orderId: orderId,
         orderInfo: orderDescription,
         redirectUrl: MOMO_CONFIG.redirectUrl,
         ipnUrl: MOMO_CONFIG.ipnUrl,
+        lang: 'vi',
         extraData: extraData,
         requestType: MOMO_CONFIG.requestType,
         signature: signature,
-        lang: 'vi'
     };
 
-    console.log('� [MOMO] Full Request Body:', JSON.stringify(requestBody, null, 2));
+    console.log('📦 [MOMO] Full Request Body:', JSON.stringify(requestBody, null, 2));
 
-    console.log('�📤 [MOMO] Request:', {
+    console.log('📤 [MOMO] Request:', {
         orderId,
         amount,
         endpoint: MOMO_CONFIG.endpoint,
@@ -139,6 +143,29 @@ async function createMoMoPayment(orderInfo) {
 // ==============================================================
 // Routes
 // ==============================================================
+
+/**
+ * GET /api/momo/test
+ * Route test nhanh để kiểm tra kết nối MoMo
+ */
+router.get('/test', async (req, res) => {
+    try {
+        const orderId = 'TEST' + Date.now();
+        const result = await createMoMoPayment({
+            orderId,
+            requestId: orderId,
+            amount: 10000,
+            orderDescription: "Test MoMo Payment",
+            extraData: ""
+        });
+        res.json({
+            success: true,
+            momoResponse: result
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 
 /**
  * POST /api/momo/create-payment
