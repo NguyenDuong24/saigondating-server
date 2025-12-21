@@ -1,5 +1,5 @@
 const express = require('express');
-const { getFirestore, Timestamp } = require('firebase-admin/firestore');
+const { getFirestore, Timestamp, FieldValue } = require('firebase-admin/firestore');
 const { getAuth } = require('firebase-admin/auth');
 
 const router = express.Router();
@@ -24,12 +24,14 @@ router.get('/items', async (req, res) => {
         // If no items, return some default ones for demo/initial setup
         if (items.length === 0) {
             const defaultItems = [
-                { id: 'vip_badge', name: 'Huy hiệu VIP', price: 500, emoji: '💎', description: 'Hiển thị huy hiệu VIP trên hồ sơ và mở khóa tính năng Pro trong 30 ngày' },
-                { id: 'extra_likes', name: 'Thêm 50 lượt thích', price: 200, emoji: '❤️', description: 'Tăng giới hạn lượt thích hàng ngày của bạn' },
-                { id: 'profile_boost', name: 'Đẩy hồ sơ', price: 300, emoji: '🚀', description: 'Hồ sơ của bạn sẽ được ưu tiên hiển thị trong 24h' },
-                { id: 'custom_theme', name: 'Giao diện đặc biệt', price: 1000, emoji: '🎨', description: 'Mở khóa giao diện tùy chỉnh cho ứng dụng' },
-                { id: 'incognito_mode', name: 'Chế độ ẩn danh', price: 800, emoji: '🕵️', description: 'Xem hồ sơ người khác mà không để lại dấu vết' },
-                { id: 'super_like_pack', name: 'Gói 10 Super Like', price: 400, emoji: '⭐', description: 'Gây ấn tượng mạnh với người bạn thích' },
+                { id: 'vip_1m', name: 'VIP 1 Tháng', price: 500, emoji: '💎', description: 'Mở khóa tính năng Pro, ẩn quảng cáo, huy hiệu VIP trong 30 ngày' },
+                { id: 'vip_3m', name: 'VIP 3 Tháng', price: 1200, emoji: '👑', description: 'Mở khóa tính năng Pro trong 90 ngày (Tiết kiệm 20%)' },
+                { id: 'boost_24h', name: 'Đẩy hồ sơ (24h)', price: 300, emoji: '🚀', description: 'Hồ sơ của bạn sẽ được ưu tiên hiển thị trong 24h' },
+                { id: 'super_like_10', name: 'Gói 10 Super Like', price: 400, emoji: '⭐', description: 'Thêm 10 lượt Super Like để gây ấn tượng mạnh' },
+                { id: 'incognito_mode', name: 'Chế độ ẩn danh', price: 600, emoji: '🕵️', description: 'Xem hồ sơ người khác mà không để lại dấu vết trong 30 ngày' },
+                { id: 'unlock_visitors', name: 'Ai đã xem tôi', price: 800, emoji: '👀', description: 'Xem danh sách những người đã ghé thăm hồ sơ của bạn trong 30 ngày' },
+                { id: 'read_receipts', name: 'Xác nhận đã đọc', price: 300, emoji: '✅', description: 'Tắt/Bật xác nhận đã đọc tin nhắn cho tất cả các cuộc trò chuyện' },
+                { id: 'rich_badge', name: 'Huy hiệu "Đại gia"', price: 5000, emoji: '💰', description: 'Huy hiệu vàng đặc biệt vĩnh viễn trên hồ sơ' },
             ];
             return res.json({ success: true, items: defaultItems, count: defaultItems.length });
         }
@@ -92,16 +94,22 @@ router.post('/purchase', async (req, res) => {
         const itemDoc = await db.collection('shop_items').doc(itemId).get();
         let item;
 
+        const defaultItems = {
+            'vip_1m': { name: 'VIP 1 Tháng', price: 500 },
+            'vip_3m': { name: 'VIP 3 Tháng', price: 1200 },
+            'boost_24h': { name: 'Đẩy hồ sơ (24h)', price: 300 },
+            'super_like_10': { name: 'Gói 10 Super Like', price: 400 },
+            'incognito_mode': { name: 'Chế độ ẩn danh', price: 600 },
+            'unlock_visitors': { name: 'Ai đã xem tôi', price: 800 },
+            'read_receipts': { name: 'Xác nhận đã đọc', price: 300 },
+            'rich_badge': { name: 'Huy hiệu "Đại gia"', price: 5000 },
+            // Legacy support
+            'vip_badge': { name: 'Huy hiệu VIP', price: 500 },
+            'profile_boost': { name: 'Đẩy hồ sơ', price: 300 },
+            'super_like_pack': { name: 'Gói 10 Super Like', price: 400 },
+        };
+
         if (!itemDoc.exists) {
-            // Check if it's one of the default items
-            const defaultItems = {
-                'vip_badge': { name: 'Huy hiệu VIP', price: 500 },
-                'extra_likes': { name: 'Thêm 50 lượt thích', price: 200 },
-                'profile_boost': { name: 'Đẩy hồ sơ', price: 300 },
-                'custom_theme': { name: 'Giao diện đặc biệt', price: 1000 },
-                'incognito_mode': { name: 'Chế độ ẩn danh', price: 800 },
-                'super_like_pack': { name: 'Gói 10 Super Like', price: 400 },
-            };
             item = defaultItems[itemId];
             if (!item) {
                 return res.status(404).json({ success: false, error: 'Item not found' });
@@ -118,10 +126,13 @@ router.post('/purchase', async (req, res) => {
 
         let newBalance;
         await db.runTransaction(async (transaction) => {
-            // Check if already owned
-            const myItemDoc = await transaction.get(myItemsRef);
-            if (myItemDoc.exists) {
-                throw new Error('ALREADY_OWNED');
+            // Check if already owned (only for non-consumable items)
+            const consumableItems = ['super_like_10', 'super_like_pack', 'boost_24h', 'profile_boost'];
+            if (!consumableItems.includes(itemId)) {
+                const myItemDoc = await transaction.get(myItemsRef);
+                if (myItemDoc.exists) {
+                    throw new Error('ALREADY_OWNED');
+                }
             }
 
             // Check balance
@@ -143,11 +154,11 @@ router.post('/purchase', async (req, res) => {
                 itemName: item.name,
                 price: item.price,
                 purchasedAt: Timestamp.now(),
-            });
+            }, { merge: true });
 
             // Apply item effects
             const userRef = db.collection('users').doc(uid);
-            if (itemId === 'vip_badge') {
+            if (itemId === 'vip_1m' || itemId === 'vip_badge') {
                 const thirtyDays = 30 * 24 * 60 * 60 * 1000;
                 const expiresAt = new Date(Date.now() + thirtyDays);
                 transaction.update(userRef, {
@@ -155,11 +166,43 @@ router.post('/purchase', async (req, res) => {
                     proExpiresAt: Timestamp.fromDate(expiresAt),
                     vipBadge: true
                 });
-            } else if (itemId === 'profile_boost') {
+            } else if (itemId === 'vip_3m') {
+                const ninetyDays = 90 * 24 * 60 * 60 * 1000;
+                const expiresAt = new Date(Date.now() + ninetyDays);
+                transaction.update(userRef, {
+                    isPro: true,
+                    proExpiresAt: Timestamp.fromDate(expiresAt),
+                    vipBadge: true
+                });
+            } else if (itemId === 'boost_24h' || itemId === 'profile_boost') {
                 const twentyFourHours = 24 * 60 * 60 * 1000;
                 const expiresAt = new Date(Date.now() + twentyFourHours);
                 transaction.update(userRef, {
                     boostedUntil: Timestamp.fromDate(expiresAt)
+                });
+            } else if (itemId === 'super_like_10' || itemId === 'super_like_pack') {
+                transaction.update(userRef, {
+                    superLikes: FieldValue.increment(10)
+                });
+            } else if (itemId === 'incognito_mode') {
+                const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+                const expiresAt = new Date(Date.now() + thirtyDays);
+                transaction.update(userRef, {
+                    incognitoUntil: Timestamp.fromDate(expiresAt)
+                });
+            } else if (itemId === 'unlock_visitors') {
+                const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+                const expiresAt = new Date(Date.now() + thirtyDays);
+                transaction.update(userRef, {
+                    canSeeVisitorsUntil: Timestamp.fromDate(expiresAt)
+                });
+            } else if (itemId === 'read_receipts') {
+                transaction.update(userRef, {
+                    hasReadReceiptsFeature: true
+                });
+            } else if (itemId === 'rich_badge') {
+                transaction.update(userRef, {
+                    hasRichBadge: true
                 });
             }
 
