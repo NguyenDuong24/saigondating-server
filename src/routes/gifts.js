@@ -73,7 +73,7 @@ router.post('/send', async (req, res) => {
         fromUid: senderUid,
         fromName: senderName,
         roomId,
-        gift: { id: gift.id, name: gift.name, price: gift.price, icon: gift.icon },
+        gift: { id: gift.id, name: gift.name, price: gift.price, icon: gift.icon, currencyType: gift.currencyType || 'coins' },
         createdAt: Timestamp.fromDate(new Date()),
         status: 'unread'
       });
@@ -85,7 +85,7 @@ router.post('/send', async (req, res) => {
         uid: senderUid,
         senderName,
         type: 'gift',
-        gift: { id: gift.id, name: gift.name, price: gift.price, icon: gift.icon },
+        gift: { id: gift.id, name: gift.name, price: gift.price, icon: gift.icon, currencyType: gift.currencyType || 'coins' },
         createdAt: Timestamp.fromDate(new Date()),
         readBy: [],
         status: 'sent'
@@ -96,7 +96,7 @@ router.post('/send', async (req, res) => {
       transaction.update(roomRef, {
         lastMessage: {
           type: 'gift',
-          gift: { id: gift.id, name: gift.name, price: gift.price, icon: gift.icon },
+          gift: { id: gift.id, name: gift.name, price: gift.price, icon: gift.icon, currencyType: gift.currencyType || 'coins' },
           createdAt: Timestamp.fromDate(new Date()),
           uid: senderUid,
           status: 'sent'
