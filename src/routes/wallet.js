@@ -9,7 +9,7 @@ const db = getFirestore();
 
 /**
  * GET /wallet/balance
- * Get user's coin balance
+ * Get user's coin and banhMi balance
  */
 router.get('/balance', async (req, res) => {
   try {
@@ -34,13 +34,17 @@ router.get('/balance', async (req, res) => {
     const walletDoc = await walletRef.get();
 
     let coins = 0;
+    let banhMi = 0;
     if (walletDoc.exists) {
-      coins = walletDoc.data().coins || 0;
+      const data = walletDoc.data();
+      coins = data.coins || 0;
+      banhMi = data.banhMi || 0;
     }
 
     res.json({
       success: true,
       coins,
+      banhMi,
       uid
     });
   } catch (error) {
@@ -51,7 +55,7 @@ router.get('/balance', async (req, res) => {
 
 /**
  * POST /wallet/topup
- * Add coins to user's balance
+ * Add coins (Paid) to user's balance
  */
 router.post('/topup', async (req, res) => {
   try {
@@ -103,6 +107,7 @@ router.post('/topup', async (req, res) => {
       transaction.set(transactionRef, {
         uid,
         type: 'topup',
+        currencyType: 'coins',
         amount,
         balance: newBalance,
         timestamp: Timestamp.now(),
@@ -112,12 +117,15 @@ router.post('/topup', async (req, res) => {
 
     // Get new balance (safe access)
     const walletDoc = await walletRef.get();
-    const newBalance = walletDoc.exists ? (walletDoc.data().coins || 0) : 0;
+    const data = walletDoc.exists ? walletDoc.data() : {};
+    const newBalance = data.coins || 0;
+    const banhMi = data.banhMi || 0;
 
     res.json({
       success: true,
       amount,
       newBalance,
+      banhMi,
       transactionId: `topup_${Date.now()}`
     });
   } catch (error) {
@@ -128,7 +136,7 @@ router.post('/topup', async (req, res) => {
 
 /**
  * POST /wallet/spend
- * Spend coins from user's balance
+ * Spend coins or banhMi from user's balance
  */
 router.post('/spend', async (req, res) => {
   try {
@@ -148,10 +156,14 @@ router.post('/spend', async (req, res) => {
     const uid = decodedToken.uid;
     console.log('[WALLET] Authenticated uid:', uid);
 
-    const { amount, metadata = {} } = req.body;
+    const { amount, currencyType = 'banhMi', metadata = {} } = req.body;
 
     if (!amount || amount < 1 || amount > 5000) {
       return res.status(400).json({ success: false, error: 'Invalid amount (1-5000)' });
+    }
+
+    if (!['coins', 'banhMi'].includes(currencyType)) {
+      return res.status(400).json({ success: false, error: 'Invalid currency type' });
     }
 
     // Update balance
@@ -160,21 +172,22 @@ router.post('/spend', async (req, res) => {
 
     await db.runTransaction(async (transaction) => {
       const walletDoc = await transaction.get(walletRef);
-      const rawCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
-      const currentCoins = isNaN(Number(rawCoins)) ? 0 : Number(rawCoins);
+      const data = walletDoc.exists ? walletDoc.data() : {};
+      const currentBalance = Number(data[currencyType] || 0);
 
-      if (currentCoins < Number(amount)) {
-        throw new Error('Insufficient balance');
+      if (currentBalance < Number(amount)) {
+        throw new Error(`Insufficient ${currencyType} balance`);
       }
 
-      newBalance = currentCoins - Number(amount);
-      transaction.set(walletRef, { coins: newBalance }, { merge: true });
+      newBalance = currentBalance - Number(amount);
+      transaction.set(walletRef, { [currencyType]: newBalance }, { merge: true });
 
       // Create transaction record
       const transactionRef = db.collection('transactions').doc();
       transaction.set(transactionRef, {
         uid,
         type: 'spend',
+        currencyType,
         amount,
         balance: newBalance,
         timestamp: Timestamp.now(),
@@ -185,13 +198,14 @@ router.post('/spend', async (req, res) => {
     res.json({
       success: true,
       amount,
+      currencyType,
       newBalance,
       transactionId: `spend_${Date.now()}`
     });
   } catch (error) {
     console.error('Spend error:', error);
-    if (error.message === 'Insufficient balance') {
-      return res.status(400).json({ success: false, error: 'Insufficient balance' });
+    if (error.message.includes('Insufficient')) {
+      return res.status(400).json({ success: false, error: error.message });
     }
     res.status(500).json({ success: false, error: 'Failed to spend' });
   }
@@ -220,8 +234,6 @@ router.get('/transactions', async (req, res) => {
     console.log('[WALLET] Authenticated uid:', uid);
 
     const limit = parseInt(req.query.limit) || 50;
-    // Note: Removed offset to avoid Firestore index requirements
-    // For pagination, consider cursor-based approach
 
     const transactionsRef = db.collection('transactions')
       .where('uid', '==', uid);
@@ -253,7 +265,7 @@ router.get('/transactions', async (req, res) => {
 
 /**
  * POST /wallet/reward
- * Reward user with coins for watching an ad
+ * Reward user with banhMi (Free) for watching an ad
  */
 router.post('/reward', async (req, res) => {
   try {
@@ -282,7 +294,6 @@ router.post('/reward', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid amount' });
     }
     if (typeof metadata !== 'object' || metadata === null) {
-      // Try to parse if it's a JSON string
       try {
         metadata = JSON.parse(metadata || '{}');
       } catch (e) {
@@ -317,12 +328,12 @@ router.post('/reward', async (req, res) => {
       transactionRef = db.collection('transactions').doc();
       await db.runTransaction(async (transaction) => {
         const walletDoc = await transaction.get(walletRef);
-        const currentCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
-        const newBalance = currentCoins + amount;
-        console.log('[WALLET REWARD] Current coins:', currentCoins, 'New balance:', newBalance);
+        const currentBanhMi = walletDoc.exists ? walletDoc.data().banhMi || 0 : 0;
+        const newBalance = currentBanhMi + amount;
+        console.log('[WALLET REWARD] Current banhMi:', currentBanhMi, 'New balance:', newBalance);
 
         transaction.set(walletRef, {
-          coins: newBalance,
+          banhMi: newBalance,
           lastReward: nowTimestamp
         }, { merge: true });
 
@@ -330,6 +341,7 @@ router.post('/reward', async (req, res) => {
         transaction.set(transactionRef, {
           uid,
           type: 'reward',
+          currencyType: 'banhMi',
           amount,
           balance: newBalance,
           timestamp: nowTimestamp,
@@ -343,19 +355,20 @@ router.post('/reward', async (req, res) => {
 
     // Get new balance
     const updatedWalletDoc = await walletRef.get();
-    const newBalance = updatedWalletDoc.exists ? (updatedWalletDoc.data().coins || 0) : 0;
-    console.log('[WALLET REWARD] Updated balance for', uid, '=>', newBalance, 'txId:', transactionRef?.id);
+    const data = updatedWalletDoc.exists ? updatedWalletDoc.data() : {};
+    const newBanhMi = data.banhMi || 0;
+    const coins = data.coins || 0;
 
     res.json({
       success: true,
       amount,
-      newBalance,
+      newBalance: newBanhMi,
+      coins,
       transactionId: transactionRef?.id || `reward_${Date.now()}`
     });
   } catch (error) {
     console.error('Reward error:', error, error.stack);
     const msg = error && error.message ? error.message : 'Failed to reward';
-    // Expose message for easier debugging in development
     if (process.env.NODE_ENV === 'development') {
       return res.status(500).json({ success: false, error: msg, details: error.stack });
     }

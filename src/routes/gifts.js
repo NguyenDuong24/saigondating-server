@@ -41,23 +41,25 @@ router.post('/send', async (req, res) => {
     // Check sender balance
     const walletRef = db.collection('users').doc(senderUid).collection('wallet').doc('balance');
     const walletDoc = await walletRef.get();
-    const rawCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
-    const currentCoins = isNaN(Number(rawCoins)) ? 0 : Number(rawCoins);
+    const walletData = walletDoc.exists ? walletDoc.data() : {};
+    const currencyType = gift.currencyType || 'coins';
+    const currentBalance = walletData[currencyType] || 0;
 
-    if (currentCoins < gift.price) {
+    if (currentBalance < gift.price) {
       return res.status(400).json({ success: false, error: 'Insufficient balance' });
     }
 
-    // Deduct coins from sender
-    const newBalance = currentCoins - gift.price;
+    // Deduct from sender
+    const newBalance = currentBalance - gift.price;
     await db.runTransaction(async (transaction) => {
-      transaction.set(walletRef, { coins: newBalance }, { merge: true });
+      transaction.set(walletRef, { [currencyType]: newBalance }, { merge: true });
 
       // Create transaction record
       const transactionRef = db.collection('transactions').doc();
       transaction.set(transactionRef, {
         uid: senderUid,
         type: 'spend',
+        currencyType: gift.currencyType || 'coins',
         amount: gift.price,
         balance: newBalance,
         timestamp: Timestamp.fromDate(new Date()),
@@ -92,7 +94,7 @@ router.post('/send', async (req, res) => {
       // Update room metadata
       const roomRef = db.collection('rooms').doc(roomId);
       transaction.update(roomRef, {
-        lastMessage: { 
+        lastMessage: {
           type: 'gift',
           gift: { id: gift.id, name: gift.name, price: gift.price, icon: gift.icon },
           createdAt: Timestamp.fromDate(new Date()),
@@ -106,14 +108,17 @@ router.post('/send', async (req, res) => {
 
     // Get updated balance
     const updatedWallet = await walletRef.get();
-    const finalBalance = updatedWallet.data().coins;
+    const finalData = updatedWallet.data() || {};
+    const finalBalance = finalData[gift.currencyType || 'coins'];
 
     res.json({
       success: true,
       gift,
       messageId: `gift_${Date.now()}`,
       receiptId: `receipt_${Date.now()}`,
-      newBalance: finalBalance
+      newBalance: finalBalance,
+      coins: finalData.coins || 0,
+      banhMi: finalData.banhMi || 0
     });
   } catch (error) {
     console.error('Send gift error:', error);
@@ -211,9 +216,10 @@ router.post('/redeem', async (req, res) => {
 
       // Get wallet
       const walletDoc = await transaction.get(walletRef);
-      const rawCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
-      const currentCoins = isNaN(Number(rawCoins)) ? 0 : Number(rawCoins);
-      const newBalance = currentCoins + redeemValue;
+      const walletData = walletDoc.exists ? walletDoc.data() : {};
+      const currencyType = receipt.gift.currencyType || 'coins';
+      const currentBalance = walletData[currencyType] || 0;
+      const newBalance = currentBalance + redeemValue;
 
       // Update receipt
       transaction.update(receiptRef, {
@@ -223,7 +229,7 @@ router.post('/redeem', async (req, res) => {
       });
 
       // Update wallet
-      transaction.set(walletRef, { coins: newBalance }, { merge: true });
+      transaction.set(walletRef, { [currencyType]: newBalance }, { merge: true });
 
       // Create transaction record
       const transactionRef = db.collection('transactions').doc();
@@ -239,13 +245,14 @@ router.post('/redeem', async (req, res) => {
 
     // Get updated balance
     const updatedWallet = await walletRef.get();
-    const rawUpdated = updatedWallet.exists ? updatedWallet.data().coins || 0 : 0;
-    const finalBalance = isNaN(Number(rawUpdated)) ? 0 : Number(rawUpdated);
+    const finalData = updatedWallet.exists ? updatedWallet.data() : {};
 
     res.json({
       success: true,
-      redeemValue: Math.floor(receipt.gift.price * rate), // Note: receipt is not in scope here, need to recalculate or store
-      newBalance: finalBalance
+      redeemValue: Math.floor(receipt.gift.price * rate),
+      newBalance: finalData[receipt.gift.currencyType || 'coins'] || 0,
+      coins: finalData.coins || 0,
+      banhMi: finalData.banhMi || 0
     });
   } catch (error) {
     console.error('Redeem gift error:', error.message, error.stack);
