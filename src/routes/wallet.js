@@ -310,14 +310,16 @@ router.post('/reward', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid reward amount' });
     }
 
-    // Simple rate limiting: check last reward within 24 hours
+    // Simple rate limiting: check last reward within 24 hours (or 1 minute in dev)
     const walletDoc = await walletRef.get();
     const walletData = walletDoc.exists ? walletDoc.data() : {};
     const lastReward = walletData.lastReward ? walletData.lastReward.toDate() : null;
     const now = new Date();
-    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
-    if (lastReward && lastReward > oneDayAgo) {
+    const cooldownMs = process.env.NODE_ENV === 'development' ? 60 * 1000 : 24 * 60 * 60 * 1000;
+    const cooldownDate = new Date(now.getTime() - cooldownMs);
+
+    if (lastReward && lastReward > cooldownDate) {
       return res.status(429).json({ success: false, error: 'Reward already claimed today. Try again tomorrow.' });
     }
 
