@@ -21,19 +21,9 @@ router.get('/items', async (req, res) => {
             ...doc.data()
         }));
 
-        // If no items, return some default ones for demo/initial setup
+        // If no items, return empty list (Admin should create items)
         if (items.length === 0) {
-            const defaultItems = [
-                { id: 'vip_1m', name: 'VIP 1 Tháng', price: 500, currencyType: 'coins', emoji: '💎', description: 'Mở khóa tính năng Pro, ẩn quảng cáo, huy hiệu VIP trong 30 ngày' },
-                { id: 'vip_3m', name: 'VIP 3 Tháng', price: 1200, currencyType: 'coins', emoji: '👑', description: 'Mở khóa tính năng Pro trong 90 ngày (Tiết kiệm 20%)' },
-                { id: 'boost_24h', name: 'Đẩy hồ sơ (24h)', price: 300, currencyType: 'coins', emoji: '🚀', description: 'Hồ sơ của bạn sẽ được ưu tiên hiển thị trong 24h' },
-                { id: 'super_like_10', name: 'Gói 10 Super Like', price: 400, currencyType: 'coins', emoji: '⭐', description: 'Thêm 10 lượt Super Like để gây ấn tượng mạnh' },
-                { id: 'incognito_mode', name: 'Chế độ ẩn danh', price: 600, currencyType: 'coins', emoji: '🕵️', description: 'Xem hồ sơ người khác mà không để lại dấu vết trong 30 ngày' },
-                { id: 'unlock_visitors', name: 'Ai đã xem tôi', price: 800, currencyType: 'coins', emoji: '👀', description: 'Xem danh sách những người đã ghé thăm hồ sơ của bạn trong 30 ngày' },
-                { id: 'read_receipts', name: 'Xác nhận đã đọc', price: 300, currencyType: 'coins', emoji: '✅', description: 'Tắt/Bật xác nhận đã đọc tin nhắn cho tất cả các cuộc trò chuyện' },
-                { id: 'rich_badge', name: 'Huy hiệu "Đại gia"', price: 5000, currencyType: 'coins', emoji: '💰', description: 'Huy hiệu vàng đặc biệt vĩnh viễn trên hồ sơ' },
-            ];
-            return res.json({ success: true, items: defaultItems, count: defaultItems.length });
+            return res.json({ success: true, items: [], count: 0 });
         }
 
         res.json({
@@ -92,33 +82,14 @@ router.post('/purchase', async (req, res) => {
 
         // Get item details
         const itemDoc = await db.collection('shop_items').doc(itemId).get();
-        let item;
-
-        const defaultItems = {
-            'vip_1m': { name: 'VIP 1 Tháng', price: 500, currencyType: 'coins' },
-            'vip_3m': { name: 'VIP 3 Tháng', price: 1200, currencyType: 'coins' },
-            'boost_24h': { name: 'Đẩy hồ sơ (24h)', price: 300, currencyType: 'coins' },
-            'super_like_10': { name: 'Gói 10 Super Like', price: 400, currencyType: 'coins' },
-            'incognito_mode': { name: 'Chế độ ẩn danh', price: 600, currencyType: 'coins' },
-            'unlock_visitors': { name: 'Ai đã xem tôi', price: 800, currencyType: 'coins' },
-            'read_receipts': { name: 'Xác nhận đã đọc', price: 300, currencyType: 'coins' },
-            'rich_badge': { name: 'Huy hiệu "Đại gia"', price: 5000, currencyType: 'coins' },
-            // Legacy support
-            'vip_badge': { name: 'Huy hiệu VIP', price: 500, currencyType: 'coins' },
-            'profile_boost': { name: 'Đẩy hồ sơ', price: 300, currencyType: 'coins' },
-            'super_like_pack': { name: 'Gói 10 Super Like', price: 400, currencyType: 'coins' },
-        };
 
         if (!itemDoc.exists) {
-            item = defaultItems[itemId];
-            if (!item) {
-                return res.status(404).json({ success: false, error: 'Item not found' });
-            }
-        } else {
-            item = itemDoc.data();
-            if (!item.active) {
-                return res.status(400).json({ success: false, error: 'Item is inactive' });
-            }
+            return res.status(404).json({ success: false, error: 'Item not found' });
+        }
+
+        const item = itemDoc.data();
+        if (!item.active) {
+            return res.status(400).json({ success: false, error: 'Item is inactive' });
         }
 
         const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');

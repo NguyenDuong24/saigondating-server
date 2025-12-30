@@ -301,35 +301,50 @@ router.post('/reward', async (req, res) => {
       }
     }
 
-    // Ensure wallet reference and a timestamp are available
+    // Get Ad Settings
+    const settingsDoc = await db.collection('system_config').doc('ad_settings').get();
+    const settings = settingsDoc.exists ? settingsDoc.data() : { rewardAmount: 10, dailyLimit: 5, enabled: true };
+
+    if (!settings.enabled) {
+      return res.status(403).json({ success: false, error: 'Ad rewards are currently disabled' });
+    }
+
+    const rewardAmount = settings.rewardAmount || 10;
+    const dailyLimit = settings.dailyLimit || 5;
+
+    // Check daily limit
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    const todayRewardsSnapshot = await db.collection('transactions')
+      .where('uid', '==', uid)
+      .where('type', '==', 'reward')
+      .where('timestamp', '>=', Timestamp.fromDate(startOfDay))
+      .count()
+      .get();
+
+    const todayCount = todayRewardsSnapshot.data().count;
+
+    if (todayCount >= dailyLimit) {
+      return res.status(429).json({
+        success: false,
+        error: `Daily limit reached (${dailyLimit}/${dailyLimit}). Come back tomorrow!`,
+        limitReached: true
+      });
+    }
+
+    // Update balance
     const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
     const nowTimestamp = Timestamp.now();
 
-    // Validate amount (fixed reward for now)
-    if (amount !== 10) {
-      return res.status(400).json({ success: false, error: 'Invalid reward amount' });
-    }
-
-    // Simple rate limiting: check last reward within 24 hours
-    const walletDoc = await walletRef.get();
-    const walletData = walletDoc.exists ? walletDoc.data() : {};
-    const lastReward = walletData.lastReward ? walletData.lastReward.toDate() : null;
-    const now = new Date();
-    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-
-    if (lastReward && lastReward > oneDayAgo) {
-      return res.status(429).json({ success: false, error: 'Reward already claimed today. Try again tomorrow.' });
-    }
-
-    // Update balance and last reward
-    console.log('[WALLET REWARD] Running transaction for uid:', uid, 'amount:', amount);
+    console.log('[WALLET REWARD] Running transaction for uid:', uid, 'amount:', rewardAmount);
     let transactionRef;
     try {
       transactionRef = db.collection('transactions').doc();
       await db.runTransaction(async (transaction) => {
         const walletDoc = await transaction.get(walletRef);
         const currentBanhMi = walletDoc.exists ? walletDoc.data().banhMi || 0 : 0;
-        const newBalance = currentBanhMi + amount;
+        const newBalance = currentBanhMi + rewardAmount;
         console.log('[WALLET REWARD] Current banhMi:', currentBanhMi, 'New balance:', newBalance);
 
         transaction.set(walletRef, {
@@ -342,7 +357,7 @@ router.post('/reward', async (req, res) => {
           uid,
           type: 'reward',
           currencyType: 'banhMi',
-          amount,
+          amount: rewardAmount,
           balance: newBalance,
           timestamp: nowTimestamp,
           metadata: { adId, ...metadata }
@@ -361,10 +376,14 @@ router.post('/reward', async (req, res) => {
 
     res.json({
       success: true,
-      amount,
+      amount: rewardAmount,
       newBalance: newBanhMi,
       coins,
-      transactionId: transactionRef?.id || `reward_${Date.now()}`
+      transactionId: transactionRef?.id || `reward_${Date.now()}`,
+      dailyLimit: {
+        current: todayCount + 1,
+        max: dailyLimit
+      }
     });
   } catch (error) {
     console.error('Reward error:', error, error.stack);

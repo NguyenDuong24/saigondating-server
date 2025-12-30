@@ -356,4 +356,171 @@ router.post('/users/:userId/unban', async (req, res) => {
     }
 });
 
+// ============== SYSTEM SETTINGS ==============
+
+/**
+ * GET /admin/settings/ads
+ * Get ad configuration
+ */
+router.get('/settings/ads', async (req, res) => {
+    try {
+        const doc = await db.collection('system_config').doc('ad_settings').get();
+
+        if (!doc.exists) {
+            // Return defaults if not set
+            return res.json({
+                success: true,
+                settings: {
+                    rewardAmount: 10,
+                    dailyLimit: 5,
+                    enabled: true
+                }
+            });
+        }
+
+        res.json({
+            success: true,
+            settings: doc.data()
+        });
+    } catch (error) {
+        console.error('Error getting ad settings:', error);
+        res.status(500).json({ error: 'Failed to get ad settings' });
+    }
+});
+
+/**
+ * PUT /admin/settings/ads
+ * Update ad configuration
+ */
+router.put('/settings/ads', async (req, res) => {
+    try {
+        const { rewardAmount, dailyLimit, enabled } = req.body;
+
+        await db.collection('system_config').doc('ad_settings').set({
+            rewardAmount: Number(rewardAmount),
+            dailyLimit: Number(dailyLimit),
+            enabled: Boolean(enabled),
+            updatedAt: FieldValue.serverTimestamp(),
+            updatedBy: req.user.uid
+        });
+
+        res.json({
+            success: true,
+            message: 'Ad settings updated successfully'
+        });
+    } catch (error) {
+        console.error('Error updating ad settings:', error);
+        res.status(500).json({ error: 'Failed to update ad settings' });
+    }
+});
+
+// ============== SHOP MANAGEMENT ==============
+
+/**
+ * GET /admin/shop/items
+ * Get all shop items (including inactive)
+ */
+router.get('/shop/items', async (req, res) => {
+    try {
+        const snapshot = await db.collection('shop_items').orderBy('price', 'asc').get();
+
+        const items = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        }));
+
+        res.json({
+            success: true,
+            items,
+            count: items.length
+        });
+    } catch (error) {
+        console.error('Error getting shop items:', error);
+        res.status(500).json({ error: 'Failed to get shop items' });
+    }
+});
+
+/**
+ * POST /admin/shop/items
+ * Create new shop item
+ */
+router.post('/shop/items', async (req, res) => {
+    try {
+        const { id, name, price, currencyType, emoji, description, active = true } = req.body;
+
+        if (!id || !name || !price) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+
+        await db.collection('shop_items').doc(id).set({
+            name,
+            price: Number(price),
+            currencyType: currencyType || 'coins',
+            emoji,
+            description,
+            active: Boolean(active),
+            createdAt: FieldValue.serverTimestamp(),
+            createdBy: req.user.uid
+        });
+
+        res.json({
+            success: true,
+            message: 'Shop item created successfully'
+        });
+    } catch (error) {
+        console.error('Error creating shop item:', error);
+        res.status(500).json({ error: 'Failed to create shop item' });
+    }
+});
+
+/**
+ * PUT /admin/shop/items/:id
+ * Update shop item
+ */
+router.put('/shop/items/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updates = req.body;
+
+        // Remove fields that shouldn't be updated directly
+        delete updates.id;
+        delete updates.createdAt;
+        delete updates.createdBy;
+
+        updates.updatedAt = FieldValue.serverTimestamp();
+        updates.updatedBy = req.user.uid;
+
+        await db.collection('shop_items').doc(id).update(updates);
+
+        res.json({
+            success: true,
+            message: 'Shop item updated successfully'
+        });
+    } catch (error) {
+        console.error('Error updating shop item:', error);
+        res.status(500).json({ error: 'Failed to update shop item' });
+    }
+});
+
+/**
+ * DELETE /admin/shop/items/:id
+ * Delete (or deactivate) shop item
+ */
+router.delete('/shop/items/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Hard delete
+        await db.collection('shop_items').doc(id).delete();
+
+        res.json({
+            success: true,
+            message: 'Shop item deleted successfully'
+        });
+    } catch (error) {
+        console.error('Error deleting shop item:', error);
+        res.status(500).json({ error: 'Failed to delete shop item' });
+    }
+});
+
 module.exports = router;
