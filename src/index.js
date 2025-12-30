@@ -43,6 +43,8 @@ admin.initializeApp({
 });
 
 const app = express();
+// Trust proxy is required when running behind a proxy like Render/Heroku
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 
 // Security middleware

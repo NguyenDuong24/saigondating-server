@@ -384,22 +384,11 @@ router.get('/settings/ads', async (req, res) => {
         });
     } catch (error) {
         console.error('Error getting ad settings:', error);
-
-        // FALLBACK: Mock data for quota exceeded
-        if (error.code === 8 || error.message.includes('Quota exceeded') || error.message.includes('RESOURCE_EXHAUSTED')) {
-            console.warn('⚠️ Quota exceeded! Returning MOCK DATA for ad settings.');
-            return res.json({
-                success: true,
-                settings: {
-                    rewardAmount: 10,
-                    dailyLimit: 5,
-                    enabled: true,
-                    isMock: true
-                }
-            });
-        }
-
-        res.status(500).json({ error: 'Failed to get ad settings' });
+        res.status(500).json({
+            error: 'Failed to get ad settings',
+            details: error.message,
+            code: error.code
+        });
     }
 });
 
@@ -451,22 +440,11 @@ router.get('/shop/items', async (req, res) => {
         });
     } catch (error) {
         console.error('Error getting shop items:', error);
-
-        // FALLBACK: Mock data for quota exceeded
-        if (error.code === 8 || error.message.includes('Quota exceeded') || error.message.includes('RESOURCE_EXHAUSTED')) {
-            console.warn('⚠️ Quota exceeded! Returning MOCK DATA for shop items.');
-            return res.json({
-                success: true,
-                items: [
-                    { id: 'mock_vip', name: 'VIP 1 Month (MOCK)', price: 500, currencyType: 'coins', emoji: '👑', description: 'Mock item due to quota limit', active: true },
-                    { id: 'mock_boost', name: 'Boost Profile (MOCK)', price: 100, currencyType: 'banhMi', emoji: '🚀', description: 'Mock item due to quota limit', active: true }
-                ],
-                count: 2,
-                isMock: true
-            });
-        }
-
-        res.status(500).json({ error: 'Failed to get shop items' });
+        res.status(500).json({
+            error: 'Failed to get shop items',
+            details: error.message,
+            code: error.code
+        });
     }
 });
 
