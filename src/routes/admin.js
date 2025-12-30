@@ -531,4 +531,116 @@ router.delete('/shop/items/:id', async (req, res) => {
     }
 });
 
+// ============== GIFT MANAGEMENT ==============
+
+/**
+ * GET /admin/gifts
+ * Get all gifts (including inactive)
+ */
+router.get('/gifts', async (req, res) => {
+    try {
+        const snapshot = await db.collection('gifts').orderBy('price', 'asc').get();
+
+        const gifts = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        }));
+
+        res.json({
+            success: true,
+            gifts,
+            count: gifts.length
+        });
+    } catch (error) {
+        console.error('Error getting gifts:', error);
+        res.status(500).json({
+            error: 'Failed to get gifts',
+            details: error.message,
+            code: error.code
+        });
+    }
+});
+
+/**
+ * POST /admin/gifts
+ * Create new gift
+ */
+router.post('/gifts', async (req, res) => {
+    try {
+        const { id, name, price, currencyType, icon, active = true } = req.body;
+
+        if (!id || !name || !price || !icon) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+
+        await db.collection('gifts').doc(id).set({
+            name,
+            price: Number(price),
+            currencyType: currencyType || 'coins',
+            icon,
+            active: Boolean(active),
+            createdAt: FieldValue.serverTimestamp(),
+            createdBy: req.user.uid
+        });
+
+        res.json({
+            success: true,
+            message: 'Gift created successfully'
+        });
+    } catch (error) {
+        console.error('Error creating gift:', error);
+        res.status(500).json({ error: 'Failed to create gift' });
+    }
+});
+
+/**
+ * PUT /admin/gifts/:id
+ * Update gift
+ */
+router.put('/gifts/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updates = req.body;
+
+        // Remove fields that shouldn't be updated directly
+        delete updates.id;
+        delete updates.createdAt;
+        delete updates.createdBy;
+
+        updates.updatedAt = FieldValue.serverTimestamp();
+        updates.updatedBy = req.user.uid;
+
+        await db.collection('gifts').doc(id).update(updates);
+
+        res.json({
+            success: true,
+            message: 'Gift updated successfully'
+        });
+    } catch (error) {
+        console.error('Error updating gift:', error);
+        res.status(500).json({ error: 'Failed to update gift' });
+    }
+});
+
+/**
+ * DELETE /admin/gifts/:id
+ * Delete gift
+ */
+router.delete('/gifts/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Hard delete
+        await db.collection('gifts').doc(id).delete();
+
+        res.json({
+            success: true,
+            message: 'Gift deleted successfully'
+        });
+    } catch (error) {
+        console.error('Error deleting gift:', error);
+        res.status(500).json({ error: 'Failed to delete gift' });
+    }
+});
+
 module.exports = router;
