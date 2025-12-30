@@ -77,6 +77,11 @@ const shopRoutes = require('./routes/shop');
 const userRoutes = require('./routes/user');
 const videosdkRoutes = require('./routes/videosdk');
 const momoRoutes = require('./routes/momo');
+const adminRoutes = require('./routes/admin');
+
+// Import middlewares
+const authMiddleware = require('./middleware/auth');
+const adminAuth = require('./middleware/adminAuth');
 
 // Register routes
 app.use('/api/wallet', walletRoutes);
@@ -85,6 +90,9 @@ app.use('/api/shop', shopRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/videosdk', videosdkRoutes);
 app.use('/api/momo', momoRoutes);
+
+// Admin routes (protected with both auth and admin check)
+app.use('/api/admin', authMiddleware, adminAuth, adminRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
