@@ -253,4 +253,53 @@ router.get('/my-items', async (req, res) => {
     }
 });
 
+/**
+ * POST /shop/equip-frame
+ * Equip an owned avatar frame
+ */
+router.post('/equip-frame', async (req, res) => {
+    try {
+        const { uid } = req.user;
+        const { frameType } = req.body;
+
+        if (!frameType) {
+            return res.status(400).json({ success: false, error: 'Frame type is required' });
+        }
+
+        const userRef = db.collection('users').doc(uid);
+        const userDoc = await userRef.get();
+
+        if (!userDoc.exists) {
+            return res.status(404).json({ success: false, error: 'User not found' });
+        }
+
+        const userData = userDoc.data();
+        const ownedFrames = userData.frames || {};
+
+        // Check if user owns this frame
+        if (!ownedFrames[frameType]) {
+            return res.status(403).json({
+                success: false,
+                error: 'You do not own this frame',
+                code: 'FRAME_NOT_OWNED'
+            });
+        }
+
+        // Equip the frame
+        await userRef.update({
+            activeFrame: frameType,
+            updatedAt: Timestamp.now()
+        });
+
+        res.json({
+            success: true,
+            activeFrame: frameType,
+            message: 'Frame equipped successfully'
+        });
+    } catch (error) {
+        console.error('Equip frame error:', error);
+        res.status(500).json({ success: false, error: 'Failed to equip frame' });
+    }
+});
+
 module.exports = router;
