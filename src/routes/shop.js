@@ -177,6 +177,13 @@ router.post('/purchase', async (req, res) => {
                 transaction.update(userRef, {
                     hasRichBadge: true
                 });
+            } else if (item.category === 'avatar_frame') {
+                // Handle avatar frame purchase
+                // Set the frame as active and add to owned frames
+                transaction.update(userRef, {
+                    activeFrame: item.frameType,
+                    [`frames.${item.frameType}`]: true
+                });
             }
 
             // Create transaction record
