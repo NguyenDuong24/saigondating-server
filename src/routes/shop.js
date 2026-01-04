@@ -1,6 +1,7 @@
 const express = require('express');
 const { getFirestore, Timestamp, FieldValue } = require('firebase-admin/firestore');
 const { getAuth } = require('firebase-admin/auth');
+const authMiddleware = require('../middleware/auth');
 
 const router = express.Router();
 const db = getFirestore();
@@ -64,16 +65,9 @@ router.get('/items/:itemId', async (req, res) => {
  * POST /shop/purchase
  * Purchase an item from the shop
  */
-router.post('/purchase', async (req, res) => {
+router.post('/purchase', authMiddleware, async (req, res) => {
     try {
-        const authHeader = req.headers.authorization;
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            return res.status(401).json({ success: false, error: 'No token provided' });
-        }
-
-        const idToken = authHeader.split('Bearer ')[1];
-        const decodedToken = await getAuth().verifyIdToken(idToken);
-        const uid = decodedToken.uid;
+        const uid = req.user.uid;
 
         const { itemId } = req.body;
         if (!itemId) {
@@ -222,16 +216,9 @@ router.post('/purchase', async (req, res) => {
  * GET /shop/my-items
  * Get user's purchased items
  */
-router.get('/my-items', async (req, res) => {
+router.get('/my-items', authMiddleware, async (req, res) => {
     try {
-        const authHeader = req.headers.authorization;
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            return res.status(401).json({ success: false, error: 'No token provided' });
-        }
-
-        const idToken = authHeader.split('Bearer ')[1];
-        const decodedToken = await getAuth().verifyIdToken(idToken);
-        const uid = decodedToken.uid;
+        const uid = req.user.uid;
 
         const myItemsRef = db.collection('users').doc(uid).collection('purchased_items');
         const snapshot = await myItemsRef.orderBy('purchasedAt', 'desc').get();
@@ -257,7 +244,7 @@ router.get('/my-items', async (req, res) => {
  * POST /shop/equip-frame
  * Equip an owned avatar frame
  */
-router.post('/equip-frame', async (req, res) => {
+router.post('/equip-frame', authMiddleware, async (req, res) => {
     try {
         const { uid } = req.user;
         const { frameType } = req.body;
