@@ -121,6 +121,10 @@ router.post('/purchase', authMiddleware, async (req, res) => {
                 itemName: item.name,
                 price: item.price,
                 purchasedAt: Timestamp.now(),
+                category: item.category || 'other',
+                frameType: item.frameType || null,
+                emoji: item.emoji || '',
+                description: item.description || ''
             }, { merge: true });
 
             // Apply item effects
@@ -223,16 +227,44 @@ router.get('/my-items', authMiddleware, async (req, res) => {
         const myItemsRef = db.collection('users').doc(uid).collection('purchased_items');
         const snapshot = await myItemsRef.orderBy('purchasedAt', 'desc').get();
 
-        const items = snapshot.docs.map(doc => ({
+        const purchasedItems = snapshot.docs.map(doc => ({
             id: doc.id,
             ...doc.data(),
             purchasedAt: doc.data().purchasedAt ? doc.data().purchasedAt.toDate() : new Date()
         }));
 
+        // Fetch full item details to ensure we have category, frameType, etc.
+        const itemsWithDetails = await Promise.all(purchasedItems.map(async (purchasedItem) => {
+            try {
+                // If the purchased item already has category/frameType, use it
+                if (purchasedItem.category && (purchasedItem.category !== 'avatar_frame' || purchasedItem.frameType)) {
+                    return purchasedItem;
+                }
+
+                // Otherwise fetch from shop_items
+                const shopItemDoc = await db.collection('shop_items').doc(purchasedItem.itemId).get();
+                if (shopItemDoc.exists) {
+                    const shopItemData = shopItemDoc.data();
+                    return {
+                        ...purchasedItem,
+                        category: shopItemData.category,
+                        frameType: shopItemData.frameType,
+                        emoji: shopItemData.emoji,
+                        description: shopItemData.description,
+                        // Keep purchased price/name as historical record, but merge other metadata
+                    };
+                }
+                return purchasedItem;
+            } catch (err) {
+                console.warn(`Failed to fetch details for item ${purchasedItem.itemId}:`, err);
+                return purchasedItem;
+            }
+        }));
+
         res.json({
             success: true,
-            items,
-            count: items.length
+            items: itemsWithDetails,
+            count: itemsWithDetails.length
         });
     } catch (error) {
         console.error('Get my items error:', error);
@@ -247,10 +279,10 @@ router.get('/my-items', authMiddleware, async (req, res) => {
 router.post('/equip-frame', authMiddleware, async (req, res) => {
     try {
         const { uid } = req.user;
-        const { frameType } = req.body;
+        const { frameType, itemId } = req.body;
 
-        if (!frameType) {
-            return res.status(400).json({ success: false, error: 'Frame type is required' });
+        if (!frameType && !itemId) {
+            return res.status(400).json({ success: false, error: 'Frame type or Item ID is required' });
         }
 
         const userRef = db.collection('users').doc(uid);
@@ -260,27 +292,51 @@ router.post('/equip-frame', authMiddleware, async (req, res) => {
             return res.status(404).json({ success: false, error: 'User not found' });
         }
 
-        const userData = userDoc.data();
-        const ownedFrames = userData.frames || {};
+        let targetFrameType = frameType;
 
-        // Check if user owns this frame
-        if (!ownedFrames[frameType]) {
-            return res.status(403).json({
-                success: false,
-                error: 'You do not own this frame',
-                code: 'FRAME_NOT_OWNED'
-            });
+        // If itemId is provided, verify ownership via purchased_items (more robust)
+        if (itemId) {
+            const purchasedItemDoc = await userRef.collection('purchased_items').doc(itemId).get();
+            if (!purchasedItemDoc.exists) {
+                return res.status(403).json({
+                    success: false,
+                    error: 'You do not own this item',
+                    code: 'ITEM_NOT_OWNED'
+                });
+            }
+
+            // Fetch the current frameType from the shop item to ensure it's up to date
+            const shopItemDoc = await db.collection('shop_items').doc(itemId).get();
+            if (shopItemDoc.exists) {
+                targetFrameType = shopItemDoc.data().frameType;
+            }
+
+            if (!targetFrameType) {
+                return res.status(400).json({ success: false, error: 'This item is not a frame' });
+            }
+        } else {
+            // Fallback to checking the frames map directly
+            const userData = userDoc.data();
+            const ownedFrames = userData.frames || {};
+            if (!ownedFrames[frameType]) {
+                return res.status(403).json({
+                    success: false,
+                    error: 'You do not own this frame',
+                    code: 'FRAME_NOT_OWNED'
+                });
+            }
         }
 
-        // Equip the frame
+        // Equip the frame and ensure it's marked as owned in the frames map
         await userRef.update({
-            activeFrame: frameType,
+            activeFrame: targetFrameType,
+            [`frames.${targetFrameType}`]: true,
             updatedAt: Timestamp.now()
         });
 
         res.json({
             success: true,
-            activeFrame: frameType,
+            activeFrame: targetFrameType,
             message: 'Frame equipped successfully'
         });
     } catch (error) {
