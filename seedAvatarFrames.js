@@ -95,6 +95,50 @@ const AVATAR_FRAMES = [
         category: 'avatar_frame',
         frameType: 'astronaut',
         active: true
+    },
+    {
+        id: 'frame_dragon',
+        name: 'Khung Kim Long',
+        price: 999,
+        currencyType: 'coins',
+        emoji: '🐉',
+        description: 'Khung rồng vàng uy nghi, biểu tượng của sức mạnh và quyền lực.',
+        category: 'avatar_frame',
+        frameType: 'dragon',
+        active: true
+    },
+    {
+        id: 'frame_phoenix',
+        name: 'Khung Hỏa Phượng',
+        price: 888,
+        currencyType: 'coins',
+        emoji: '🔥',
+        description: 'Khung phượng hoàng lửa rực cháy, biểu tượng của sự tái sinh.',
+        category: 'avatar_frame',
+        frameType: 'phoenix',
+        active: true
+    },
+    {
+        id: 'frame_cyberpunk',
+        name: 'Khung Cyberpunk',
+        price: 777,
+        currencyType: 'coins',
+        emoji: '🤖',
+        description: 'Khung phong cách tương lai với đèn neon rực rỡ.',
+        category: 'avatar_frame',
+        frameType: 'cyberpunk',
+        active: true
+    },
+    {
+        id: 'frame_galaxy',
+        name: 'Khung Thiên Hà',
+        price: 666,
+        currencyType: 'coins',
+        emoji: '🌌',
+        description: 'Khung vũ trụ huyền bí với các vì sao và tinh vân.',
+        category: 'avatar_frame',
+        frameType: 'galaxy',
+        active: true
     }
 ];
 
