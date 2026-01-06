@@ -281,6 +281,19 @@ router.post('/equip-frame', authMiddleware, async (req, res) => {
         const { uid } = req.user;
         const { frameType, itemId } = req.body;
 
+        // Handle unequip case
+        if (frameType === '' || frameType === null) {
+            await db.collection('users').doc(uid).update({
+                activeFrame: null,
+                updatedAt: Timestamp.now()
+            });
+            return res.json({
+                success: true,
+                activeFrame: null,
+                message: 'Frame unequipped successfully'
+            });
+        }
+
         if (!frameType && !itemId) {
             return res.status(400).json({ success: false, error: 'Frame type or Item ID is required' });
         }
