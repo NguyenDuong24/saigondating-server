@@ -86,17 +86,6 @@ const AVATAR_FRAMES = [
         active: true
     },
     {
-        id: 'frame_astronaut',
-        name: 'Khung Phi Hành Gia',
-        price: 550,
-        currencyType: 'coins',
-        emoji: '👨‍🚀',
-        description: 'Khung phi hành gia khám phá các vì sao tinh tú.',
-        category: 'avatar_frame',
-        frameType: 'astronaut',
-        active: true
-    },
-    {
         id: 'frame_dragon',
         name: 'Khung Kim Long',
         price: 999,
@@ -142,7 +131,24 @@ const AVATAR_FRAMES = [
     }
 ];
 
+const FRAMES_TO_DELETE = [
+    'frame_diamond',
+    'frame_fire',
+    'frame_silver',
+    'frame_star',
+    'frame_rainbow',
+    'frame_neon',
+    'frame_heart',
+    'frame_golden'
+];
+
 async function seedAvatarFrames() {
+    console.log('🧹 Cleaning up old frames...');
+    for (const id of FRAMES_TO_DELETE) {
+        await db.collection('shop_items').doc(id).delete();
+        console.log(`🗑️ Deleted: ${id}`);
+    }
+
     console.log('🖼️  Seeding avatar frame items...');
     const batch = db.batch();
 
