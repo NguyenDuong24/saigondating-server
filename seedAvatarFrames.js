@@ -139,7 +139,8 @@ const FRAMES_TO_DELETE = [
     'frame_rainbow',
     'frame_neon',
     'frame_heart',
-    'frame_golden'
+    'frame_golden',
+    'frame_astronaut'
 ];
 
 async function seedAvatarFrames() {
