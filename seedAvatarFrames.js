@@ -140,6 +140,7 @@ const FRAMES_TO_DELETE = [
     'frame_neon',
     'frame_heart',
     'frame_golden',
+    'frame_gold',
     'frame_astronaut'
 ];
 
