@@ -49,22 +49,7 @@ const PORT = process.env.PORT || 3000;
 
 // Security middleware
 app.use(helmet());
-app.use(cors({
-  origin: true,  // Allow all origins
-  credentials: true
-}));
-
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
-  message: 'Too many requests from this IP, please try again later.'
-});
-app.use(limiter);
-
-// Compression middleware
-app.use(compression());
-
+app.use(cors());
 // Logging middleware
 app.use(morgan('combined'));
 
@@ -79,6 +64,7 @@ const shopRoutes = require('./routes/shop');
 const userRoutes = require('./routes/user');
 const videosdkRoutes = require('./routes/videosdk');
 const momoRoutes = require('./routes/momo');
+const vietqrRoutes = require('./routes/vietqr');
 const adminRoutes = require('./routes/admin');
 
 // Import middlewares
@@ -92,6 +78,7 @@ app.use('/api/shop', shopRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/videosdk', videosdkRoutes);
 app.use('/api/momo', momoRoutes);
+app.use('/api/vietqr', vietqrRoutes);
 
 // Admin routes (protected with both auth and admin check)
 app.use('/api/admin', authMiddleware, adminAuth, adminRoutes);

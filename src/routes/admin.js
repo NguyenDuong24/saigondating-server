@@ -643,4 +643,387 @@ router.delete('/gifts/:id', async (req, res) => {
     }
 });
 
+// ============== HOTSPOT MANAGEMENT ==============
+
+/**
+ * GET /admin/hotspots
+ * Get all hotspots
+ */
+router.get('/hotspots', async (req, res) => {
+    try {
+        console.log('🔥 Admin: Fetching hotspots');
+
+        // Fetch from both 'hotspots' (new) and 'hotSpots' (old) to ensure nothing is missed
+        const [snapshot1, snapshot2] = await Promise.all([
+            db.collection('hotspots').get(),
+            db.collection('hotSpots').get()
+        ]);
+
+        const hotspots = [
+            ...snapshot1.docs.map(doc => ({ id: doc.id, ...doc.data() })),
+            ...snapshot2.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+        ];
+
+        // Sort by createdAt (handling both string and Timestamp)
+        hotspots.sort((a, b) => {
+            const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt || 0);
+            const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt || 0);
+            return dateB - dateA;
+        });
+
+        res.json({
+            success: true,
+            hotspots,
+            count: hotspots.length
+        });
+    } catch (error) {
+        console.error('Error getting hotspots:', error);
+        res.status(500).json({
+            error: 'Failed to get hotspots',
+            details: error.message
+        });
+    }
+});
+
+/**
+ * POST /admin/hotspots
+ * Create new hotspot
+ */
+router.post('/hotspots', async (req, res) => {
+    try {
+        const hotspotData = req.body;
+        const id = hotspotData.id || db.collection('hotspots').doc().id;
+
+        hotspotData.createdAt = FieldValue.serverTimestamp();
+        hotspotData.updatedAt = FieldValue.serverTimestamp();
+        hotspotData.createdBy = req.user.uid;
+
+        if (!hotspotData.stats) {
+            hotspotData.stats = {
+                interested: 0,
+                joined: 0,
+                checkedIn: 0,
+                rating: 0,
+                reviewCount: 0,
+            };
+        }
+
+        await db.collection('hotspots').doc(id).set(hotspotData);
+
+        res.json({
+            success: true,
+            message: 'Hotspot created successfully',
+            id
+        });
+    } catch (error) {
+        console.error('Error creating hotspot:', error);
+        res.status(500).json({ error: 'Failed to create hotspot' });
+    }
+});
+
+/**
+ * PUT /admin/hotspots/:id
+ * Update hotspot
+ */
+router.put('/hotspots/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updates = req.body;
+        console.log(`📝 Admin: Updating hotspot ${id}`, updates);
+
+        delete updates.id;
+        delete updates.createdAt;
+        delete updates.createdBy;
+
+        updates.updatedAt = FieldValue.serverTimestamp();
+        updates.updatedBy = req.user.uid;
+
+        // Try to update in 'hotspots' first
+        const docRef1 = db.collection('hotspots').doc(id);
+        const doc1 = await docRef1.get();
+
+        if (doc1.exists) {
+            console.log('Found in "hotspots" collection');
+            await docRef1.update(updates);
+        } else {
+            // Try 'hotSpots'
+            console.log('Not found in "hotspots", trying "hotSpots"');
+            const docRef2 = db.collection('hotSpots').doc(id);
+            const doc2 = await docRef2.get();
+            if (doc2.exists) {
+                console.log('Found in "hotSpots" collection');
+                await docRef2.update(updates);
+            } else {
+                console.log('Hotspot not found in either collection');
+                return res.status(404).json({ error: 'Hotspot not found' });
+            }
+        }
+
+        res.json({
+            success: true,
+            message: 'Hotspot updated successfully'
+        });
+    } catch (error) {
+        console.error('Error updating hotspot:', error);
+        res.status(500).json({ error: 'Failed to update hotspot', details: error.message });
+    }
+});
+
+/**
+ * DELETE /admin/hotspots/:id
+ * Delete hotspot
+ */
+router.delete('/hotspots/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Try to delete from both (delete is idempotent in Firestore if using ref.delete(), 
+        // but we want to be sure we hit the right one if we were to use transactions)
+        await Promise.all([
+            db.collection('hotspots').doc(id).delete(),
+            db.collection('hotSpots').doc(id).delete()
+        ]);
+
+        res.json({
+            success: true,
+            message: 'Hotspot deleted successfully'
+        });
+    } catch (error) {
+        console.error('Error deleting hotspot:', error);
+        res.status(500).json({ error: 'Failed to delete hotspot' });
+    }
+});
+
+// ============== HOTSPOT ACTIVITY ==============
+
+/**
+ * GET /admin/hotspots/interactions
+ */
+router.get('/hotspots/interactions', async (req, res) => {
+    try {
+        console.log('🔍 Admin: Fetching hotspot interactions');
+        const snapshot = await db.collection('hotSpotInteractions').orderBy('timestamp', 'desc').limit(100).get();
+        console.log(`✅ Found ${snapshot.docs.length} interactions in hotSpotInteractions`);
+
+        const interactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+        // Also check eventInterests
+        const interestsSnapshot = await db.collection('eventInterests').orderBy('createdAt', 'desc').limit(100).get();
+        console.log(`✅ Found ${interestsSnapshot.docs.length} interests in eventInterests`);
+
+        const interests = interestsSnapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                userId: data.userId,
+                hotSpotId: data.eventId,
+                type: 'interested',
+                timestamp: data.createdAt,
+                ...data
+            };
+        });
+
+        // Merge
+        let allInteractions = [...interactions, ...interests];
+
+        // Enrich with HotSpot titles
+        const uniqueHotSpotIds = [...new Set(allInteractions.map(i => i.hotSpotId).filter(Boolean))];
+        const hotSpotTitles = {};
+
+        await Promise.all(uniqueHotSpotIds.map(async (id) => {
+            // Try both collections
+            let spotDoc = await db.collection('hotspots').doc(id).get();
+            if (!spotDoc.exists) {
+                spotDoc = await db.collection('hotSpots').doc(id).get();
+            }
+            if (spotDoc.exists) {
+                hotSpotTitles[id] = spotDoc.data().title;
+            }
+        }));
+
+        allInteractions = allInteractions.map(i => ({
+            ...i,
+            hotSpotTitle: hotSpotTitles[i.hotSpotId] || i.hotSpotTitle
+        })).sort((a, b) => {
+            const timeA = a.timestamp?.toDate ? a.timestamp.toDate() : new Date(a.timestamp || 0);
+            const timeB = b.timestamp?.toDate ? b.timestamp.toDate() : new Date(b.timestamp || 0);
+            return timeB - timeA;
+        }).slice(0, 100);
+
+        res.json({ success: true, interactions: allInteractions });
+    } catch (error) {
+        console.error('❌ Error fetching interactions:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * GET /admin/hotspots/invitations
+ */
+router.get('/hotspots/invitations', async (req, res) => {
+    try {
+        console.log('🔍 Admin: Fetching hotspot invitations');
+        // Try both hotSpotInvitations and eventInvites
+        const [snap1, snap2] = await Promise.all([
+            db.collection('hotSpotInvitations').orderBy('createdAt', 'desc').limit(50).get(),
+            db.collection('eventInvites').orderBy('createdAt', 'desc').limit(50).get()
+        ]);
+
+        console.log(`✅ Found ${snap1.docs.length} in hotSpotInvitations, ${snap2.docs.length} in eventInvites`);
+
+        const inv1 = snap1.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const inv2 = snap2.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                hotSpotId: data.eventId,
+                fromUserId: data.inviterId,
+                toUserId: data.inviteeId,
+                status: data.status,
+                createdAt: data.createdAt,
+                expiresAt: data.expiresAt,
+                ...data
+            };
+        });
+
+        let allInvitations = [...inv1, ...inv2];
+
+        // Enrich with HotSpot titles if missing
+        const uniqueHotSpotIds = [...new Set(allInvitations.filter(i => !i.hotSpotTitle).map(i => i.hotSpotId).filter(Boolean))];
+        const hotSpotTitles = {};
+
+        await Promise.all(uniqueHotSpotIds.map(async (id) => {
+            let spotDoc = await db.collection('hotspots').doc(id).get();
+            if (!spotDoc.exists) {
+                spotDoc = await db.collection('hotSpots').doc(id).get();
+            }
+            if (spotDoc.exists) {
+                hotSpotTitles[id] = spotDoc.data().title;
+            }
+        }));
+
+        allInvitations = allInvitations.map(i => ({
+            ...i,
+            hotSpotTitle: i.hotSpotTitle || hotSpotTitles[i.hotSpotId]
+        })).sort((a, b) => {
+            const timeA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt || 0);
+            const timeB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt || 0);
+            return timeB - timeA;
+        }).slice(0, 100);
+
+        res.json({ success: true, invitations: allInvitations });
+    } catch (error) {
+        console.error('❌ Error fetching invitations:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * GET /admin/hotspots/passes
+ */
+router.get('/hotspots/passes', async (req, res) => {
+    try {
+        console.log('🔍 Admin: Fetching event passes');
+        const snapshot = await db.collection('eventPasses').orderBy('earnedAt', 'desc').limit(100).get();
+        console.log(`✅ Found ${snapshot.docs.length} event passes`);
+        const passes = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        res.json({ success: true, passes });
+    } catch (error) {
+        console.error('❌ Error fetching passes:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * DELETE /admin/hotspots/interactions/:id
+ */
+router.delete('/hotspots/interactions/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        await Promise.all([
+            db.collection('hotSpotInteractions').doc(id).delete(),
+            db.collection('eventInterests').doc(id).delete()
+        ]);
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * DELETE /admin/hotspots/invitations/:id
+ */
+router.delete('/hotspots/invitations/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        await Promise.all([
+            db.collection('hotSpotInvitations').doc(id).delete(),
+            db.collection('eventInvites').doc(id).delete()
+        ]);
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * DELETE /admin/hotspots/passes/:id
+ */
+router.delete('/hotspots/passes/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        await db.collection('eventPasses').doc(id).delete();
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * PUT /admin/hotspots/invitations/:id/status
+ */
+router.put('/hotspots/invitations/:id/status', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { status } = req.body;
+
+        // Try both collections
+        const ref1 = db.collection('hotSpotInvitations').doc(id);
+        const ref2 = db.collection('eventInvites').doc(id);
+
+        const [doc1, doc2] = await Promise.all([ref1.get(), ref2.get()]);
+
+        const updates = {
+            status,
+            updatedAt: FieldValue.serverTimestamp()
+        };
+
+        const promises = [];
+        if (doc1.exists) promises.push(ref1.update(updates));
+        if (doc2.exists) promises.push(ref2.update(updates));
+
+        await Promise.all(promises);
+
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * PUT /admin/hotspots/passes/:id/verify
+ */
+router.put('/hotspots/passes/:id/verify', async (req, res) => {
+    try {
+        await db.collection('eventPasses').doc(req.params.id).update({
+            isVerified: req.body.isVerified,
+            verifiedAt: req.body.isVerified ? FieldValue.serverTimestamp() : null,
+            verifiedBy: req.body.isVerified ? req.user.uid : null
+        });
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 module.exports = router;
