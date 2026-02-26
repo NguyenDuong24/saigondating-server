@@ -309,6 +309,8 @@ router.post('/create-payment', async (req, res) => {
       // Coin purchase
       amount = coinPackage.price;
       const orderId = generateOrderId();
+      const transactionCode = `VQR_${Date.now()}_${uid.substring(0, 8)}`;
+      const expiresAt = Math.floor((Date.now() + 10 * 60 * 1000) / 1000);
 
       orderData = {
         uid,
@@ -320,6 +322,10 @@ router.post('/create-payment', async (req, res) => {
         status: 'pending',
         createdAt: Timestamp.now(),
         description: `${productType}_${orderId}`,
+        transactionCode,
+        expiresAt,
+        processedTxnIds: [],
+        attemptCount: 0,
       };
 
       description = orderData.description;
@@ -327,6 +333,8 @@ router.post('/create-payment', async (req, res) => {
       // Pro upgrade (assumes fixed price)
       amount = process.env.PRO_UPGRADE_PRICE || 99000;
       const orderId = generateOrderId();
+      const transactionCode = `VQR_${Date.now()}_${uid.substring(0, 8)}`;
+      const expiresAt = Math.floor((Date.now() + 10 * 60 * 1000) / 1000);
 
       orderData = {
         uid,
@@ -337,6 +345,10 @@ router.post('/create-payment', async (req, res) => {
         status: 'pending',
         createdAt: Timestamp.now(),
         description: `PRO_${orderId}`,
+        transactionCode,
+        expiresAt,
+        processedTxnIds: [],
+        attemptCount: 0,
       };
 
       description = orderData.description;
@@ -433,6 +445,19 @@ router.post('/verify-payment', async (req, res) => {
 
     const orderData = orderDoc.data();
 
+    // ✅ IDEMPOTENCY CHECK: Has this payment already been processed?
+    const txnId = `TXN_${Date.now()}_${uid.substring(0, 8)}`;
+    if (orderData.processedTxnIds && orderData.processedTxnIds.length > 0) {
+      console.log('[VIETQR] ⚠️ Order already processed, preventing duplicate:', orderId);
+      return res.json({
+        success: true,
+        orderId,
+        status: 'completed',
+        message: 'Payment already processed (idempotent)',
+        alreadyProcessed: true,
+      });
+    }
+
     // Update order status to completed
     await orderRef.update({
       status: 'completed',
@@ -473,12 +498,19 @@ router.post('/verify-payment', async (req, res) => {
           currencyType: 'coin',
           createdAt: Timestamp.now(),
           orderId: orderId,
+          transactionCode: orderData.transactionCode,
           status: 'completed',
+          verificationMethod: 'manual',
           metadata: {
             source: 'vietqr',
             description: description,
           },
         });
+      });
+
+      // ✅ Mark transaction as processed (idempotency check)
+      await orderRef.update({
+        processedTxnIds: admin.firestore.FieldValue.arrayUnion(txnId),
       });
 
       result.newBalance = (walletDoc?.data()?.coins || 0) + orderData.coinPackage.amount;
@@ -495,6 +527,11 @@ router.post('/verify-payment', async (req, res) => {
         proExpiresAt: Timestamp.fromDate(proExpiry),
         proActivatedAt: Timestamp.now(),
         lastProPaymentDate: Timestamp.now(),
+      });
+
+      // ✅ Mark transaction as processed (idempotency check)
+      await orderRef.update({
+        processedTxnIds: admin.firestore.FieldValue.arrayUnion(txnId),
       });
 
       result.proStatus = 'activated';
@@ -532,6 +569,27 @@ router.get('/order-status/:orderId', async (req, res) => {
     }
 
     const orderData = orderDoc.data();
+
+    // Check if order has expired
+    const now = Math.floor(Date.now() / 1000);
+    if (orderData.expiresAt && now > orderData.expiresAt) {
+      // Mark as expired if not already
+      if (orderData.status === 'pending') {
+        await orderRef.update({
+          status: 'expired',
+          verificationMethod: 'timeout',
+        });
+      }
+      return res.json({
+        success: true,
+        orderId,
+        status: 'expired',
+        product: orderData.product,
+        amount: orderData.amount,
+        message: 'Order expired (10 min timeout)',
+      });
+    }
+
     res.json({
       success: true,
       orderId,
@@ -540,6 +598,7 @@ router.get('/order-status/:orderId', async (req, res) => {
       amount: orderData.amount,
       createdAt: orderData.createdAt?.toDate?.() || orderData.createdAt,
       completedAt: orderData.completedAt?.toDate?.() || orderData.completedAt,
+      expiresAt: orderData.expiresAt,
     });
   } catch (error) {
     console.error('[VIETQR] order-status error:', error);
@@ -677,10 +736,35 @@ router.post('/check-pending', async (req, res) => {
       }
     }
 
+    // ✅ CLEANUP: Delete expired orders from Firestore
+    console.log('[VIETQR] 🗑️ Cleaning up expired orders...');
+    const now = Math.floor(Date.now() / 1000);
+    const expiredOrders = await db.collectionGroup('orders')
+      .where('expiresAt', '<', now)
+      .get();
+
+    let cleanedUpCount = 0;
+    for (const doc of expiredOrders.docs) {
+      try {
+        const order = doc.data();
+        // Only delete if order is in pending or expired status
+        if (order.status === 'pending' || order.status === 'expired') {
+          await doc.ref.delete();
+          cleanedUpCount++;
+          console.log('[VIETQR] 🗑️ Deleted expired order:', doc.id);
+        }
+      } catch (error) {
+        console.error('[VIETQR] Error deleting expired order:', error);
+      }
+    }
+
+    console.log(`[VIETQR] Cleanup complete - deleted ${cleanedUpCount} expired orders`);
+
     res.json({
       success: true,
       message: `Checked ${pendingOrders.size} pending orders`,
       verified: verifiedCount,
+      cleanedUp: cleanedUpCount,
       errors: errors.length > 0 ? errors : undefined,
     });
 
