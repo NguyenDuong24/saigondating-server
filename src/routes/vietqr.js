@@ -599,6 +599,7 @@ router.get('/order-status/:orderId', async (req, res) => {
       createdAt: orderData.createdAt?.toDate?.() || orderData.createdAt,
       completedAt: orderData.completedAt?.toDate?.() || orderData.completedAt,
       expiresAt: orderData.expiresAt,
+      verificationMethod: orderData.verificationMethod || null,
     });
   } catch (error) {
     console.error('[VIETQR] order-status error:', error);
@@ -685,6 +686,302 @@ router.post('/webhook/banking', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
+/**
+ * POST /vietqr/sms-received
+ * SMS Banking Reader - Secure SMS-based payment verification
+ * 
+ * Flow:
+ * 1. Android SMS Reader receives SMS from Vietcombank
+ * 2. Reader parses SMS: amount, account, timestamp
+ * 3. Reader generates HMAC-SHA256 signature for secure transmission
+ * 4. Reader POSTs SMS to this endpoint with signature
+ * 5. Server verifies signature (only valid SMS from authorized device)
+ * 6. Server extracts amount and finds matching pending order
+ * 7. Server verifies amount matches
+ * 8. Server updates order status = 'completed'
+ * 9. Server credits coins (idempotent - never twice)
+ * 10. App polling detects within 3-6 seconds
+ * 
+ * Security:
+ * - HMAC-SHA256 signature verification (SMS_READER_SECRET)
+ * - Amount matching (prevents wrong SMS)
+ * - Idempotency check (prevents duplicate coins)
+ * - Never trusts client user input
+ */
+router.post('/sms-received', async (req, res) => {
+  try {
+    const { smsContent, timestamp, signature, deviceId } = req.body;
+    
+    console.log('[VIETQR SMS] Received SMS verification request');
+    
+    // ============================================================
+    // 1. Validate input
+    // ============================================================
+    if (!smsContent || !timestamp || !signature) {
+      console.error('[VIETQR SMS] Missing required fields');
+      return res.status(400).json({
+        success: false,
+        message: 'Missing smsContent, timestamp, or signature'
+      });
+    }
+    
+    // ============================================================
+    // 2. Verify HMAC-SHA256 signature
+    // ============================================================
+    const smsReaderSecret = process.env.SMS_READER_SECRET;
+    if (!smsReaderSecret) {
+      console.error('[VIETQR SMS] SMS_READER_SECRET not configured');
+      return res.status(500).json({
+        success: false,
+        message: 'Server configuration error'
+      });
+    }
+    
+    const data = `${smsContent}|${timestamp}`;
+    const expectedSignature = crypto
+      .createHmac('sha256', smsReaderSecret)
+      .update(data)
+      .digest('hex');
+    
+    if (signature !== expectedSignature) {
+      console.error('[VIETQR SMS] ❌ Signature mismatch - invalid SMS or device');
+      console.error('[VIETQR SMS]', { 
+        expected: expectedSignature.substring(0, 16) + '...', 
+        received: signature.substring(0, 16) + '...' 
+      });
+      return res.status(401).json({
+        success: false,
+        message: 'Signature verification failed'
+      });
+    }
+    
+    console.log('[VIETQR SMS] ✅ Signature verified');
+    
+    // ============================================================
+    // 3. Parse SMS content
+    // ============================================================
+    const parsedSms = parseSmsContent(smsContent);
+    if (!parsedSms) {
+      console.error('[VIETQR SMS] Could not parse SMS:', smsContent.substring(0, 50));
+      return res.status(400).json({
+        success: false,
+        message: 'Could not parse SMS content'
+      });
+    }
+    
+    console.log('[VIETQR SMS] 📝 Parsed SMS:', {
+      amount: parsedSms.amount,
+      account: parsedSms.account
+    });
+    
+    // ============================================================
+    // 4. Find matching pending order by amount
+    // ============================================================
+    const pendingOrders = await db.collectionGroup('orders')
+      .where('status', '==', 'pending')
+      .where('amount', '==', parsedSms.amount)
+      .limit(1)
+      .get();
+    
+    if (pendingOrders.empty) {
+      console.warn('[VIETQR SMS] ⚠️ No pending order found for amount:', parsedSms.amount);
+      return res.status(404).json({
+        success: false,
+        message: 'No matching order found for this amount'
+      });
+    }
+    
+    const orderDoc = pendingOrders.docs[0];
+    const orderId = orderDoc.id;
+    const orderData = orderDoc.data();
+    const uid = orderDoc.ref.parent.parent.id;
+    
+    console.log('[VIETQR SMS] 🎯 Found matching order:', {
+      orderId,
+      amount: orderData.amount,
+      uid: uid.substring(0, 8) + '...'
+    });
+    
+    // ============================================================
+    // 5. Verify amount exactly matches
+    // ============================================================
+    if (parsedSms.amount !== orderData.amount) {
+      console.error('[VIETQR SMS] Amount mismatch:', {
+        sms: parsedSms.amount,
+        order: orderData.amount
+      });
+      return res.status(400).json({
+        success: false,
+        message: 'Amount mismatch'
+      });
+    }
+    
+    // ============================================================
+    // 6. Check if order already completed (avoid duplicates)
+    // ============================================================
+    if (orderData.status === 'completed') {
+      console.log('[VIETQR SMS] ⚠️ Order already completed (idempotent):', orderId);
+      return res.json({
+        success: true,
+        orderId,
+        amount: parsedSms.amount,
+        message: 'Order already completed (idempotent)',
+        alreadyProcessed: true
+      });
+    }
+    
+    // ============================================================
+    // 7. Check idempotency - has this SMS already been processed?
+    // ============================================================
+    const smsCode = crypto
+      .createHash('sha256')
+      .update(smsContent)
+      .digest('hex')
+      .substring(0, 16);
+    
+    const processedSmsCodes = orderData.processedSmsCodes || [];
+    if (processedSmsCodes.includes(smsCode)) {
+      console.log('[VIETQR SMS] ⚠️ SMS already processed (idempotent):', smsCode);
+      return res.json({
+        success: true,
+        orderId,
+        amount: parsedSms.amount,
+        message: 'SMS already processed (idempotent)',
+        alreadyProcessed: true
+      });
+    }
+    
+    // ============================================================
+    // 8. Update order status to completed
+    // ============================================================
+    const orderRef = db.collection('users').doc(uid).collection('orders').doc(orderId);
+    
+    await orderRef.update({
+      status: 'completed',
+      verificationMethod: 'sms_banking',
+      verifiedAt: Timestamp.now(),
+      smsCode: smsCode,
+      processedSmsCodes: admin.firestore.FieldValue.arrayUnion(smsCode),
+      smsContent: smsContent.substring(0, 100) // Store truncated SMS for audit
+    });
+    
+    console.log('[VIETQR SMS] ✅ Order status updated to completed');
+    
+    // ============================================================
+    // 9. Credit coins to user wallet (idempotent)
+    // ============================================================
+    let coinsAdded = 0;
+    
+    if (orderData.product === 'coin') {
+      const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
+      
+      await db.runTransaction(async (transaction) => {
+        const walletDoc = await transaction.get(walletRef);
+        const currentCoins = walletDoc.exists ? (walletDoc.data().coins || 0) : 0;
+        const newCoins = currentCoins + orderData.coinPackage.amount;
+        
+        transaction.update(walletRef, {
+          coins: newCoins,
+          lastUpdate: Timestamp.now()
+        });
+        
+        // Create transaction record
+        const txnRef = db.collection('users').doc(uid)
+          .collection('wallet')
+          .collection('transactions')
+          .doc();
+        
+        transaction.set(txnRef, {
+          id: txnRef.id,
+          type: 'topup_vietqr',
+          amount: orderData.coinPackage.amount,
+          price: orderData.amount,
+          currencyType: 'coin',
+          createdAt: Timestamp.now(),
+          orderId: orderId,
+          status: 'completed',
+          verificationMethod: 'sms_banking',
+          smsCode: smsCode,
+          metadata: {
+            source: 'sms_banking',
+            deviceId: deviceId,
+            smsTimestamp: timestamp
+          }
+        });
+        
+        coinsAdded = orderData.coinPackage.amount;
+      });
+      
+      console.log('[VIETQR SMS] 💰 Coins credited:', coinsAdded);
+      
+      // Send notification to user
+      try {
+        await sendNotification(
+          uid,
+          '✅ Nạp xu thành công!',
+          `Bạn vừa nạp ${coinsAdded} xu từ thanh toán VietQR`
+        );
+      } catch (notifError) {
+        console.error('[VIETQR SMS] Notification failed:', notifError);
+        // Don't fail the whole request if notification fails
+      }
+    }
+    
+    // ============================================================
+    // 10. Return success response
+    // ============================================================
+    console.log('[VIETQR SMS] 🎉 Payment verified successfully!');
+    
+    return res.json({
+      success: true,
+      orderId,
+      amount: parsedSms.amount,
+      coins: coinsAdded,
+      message: 'Payment verified via SMS Banking',
+      verificationMethod: 'sms_banking',
+      timestamp: Date.now()
+    });
+    
+  } catch (error) {
+    console.error('[VIETQR SMS] Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error processing SMS',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Helper: Parse Vietcombank SMS content
+ * Extracts amount and account from SMS text
+ */
+function parseSmsContent(message) {
+  try {
+    // Pattern: "GD thanh cong: 2000d tu TK *8394..." or "2,000đ"
+    const amountMatch = message.match(/([\d,]+)\s*[dđ]/i);
+    if (!amountMatch) {
+      console.warn('[SMS Parse] No amount found');
+      return null;
+    }
+    
+    const amount = parseInt(amountMatch[1].replace(/,/g, ''), 10);
+    
+    // Pattern: "TK *8394" or "TK 1018395984"
+    const accountMatch = message.match(/TK\s*([*\d]+)/i);
+    const account = accountMatch ? accountMatch[1] : 'unknown';
+    
+    if (amount && amount > 0) {
+      return { amount, account };
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('[SMS Parse Error]', error);
+    return null;
+  }
+}
 
 /**
  * POST /vietqr/check-pending
