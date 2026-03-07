@@ -1000,12 +1000,21 @@ router.post('/check-pending', async (req, res) => {
 
     console.log('[VIETQR] 🕐 Checking pending orders...');
 
-    // 🔍 Find all pending orders created in last 15 minutes
+    // 🔍 Find all pending orders (filter by time on client to avoid index)
     const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
-    const pendingOrders = await db.collectionGroup('orders')
+    const allPendingOrders = await db.collectionGroup('orders')
       .where('status', '==', 'pending')
-      .where('createdAt', '>', Timestamp.fromDate(fifteenMinutesAgo))
       .get();
+
+    // Filter by createdAt on client (temporary workaround)
+    const pendingOrders = {
+      docs: allPendingOrders.docs.filter(doc => {
+        const orderTime = doc.data().createdAt?.toDate?.() || new Date(0);
+        return orderTime > fifteenMinutesAgo;
+      }),
+      size: 0
+    };
+    pendingOrders.size = pendingOrders.docs.length;
 
     console.log('[VIETQR] Found pending orders:', pendingOrders.size);
 
