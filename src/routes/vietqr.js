@@ -785,22 +785,61 @@ router.post('/sms-received', async (req, res) => {
     let pendingOrders;
 
     if (parsedSms.memo) {
-      console.log('[VIETQR SMS] 🔍 Searching by unique memo:', parsedSms.memo);
-      pendingOrders = await db.collectionGroup('orders')
-        .where('description', '==', parsedSms.memo)
-        .where('status', '==', 'pending')
-        .limit(1)
-        .get();
+      // Strategy 1: Search by orderId field (memo = ORDxxx, orderId = ORDxxx)
+      console.log('[VIETQR SMS] 🔍 Searching by orderId:', parsedSms.memo);
+      try {
+        pendingOrders = await db.collectionGroup('orders')
+          .where('orderId', '==', parsedSms.memo)
+          .where('status', '==', 'pending')
+          .limit(1)
+          .get();
+      } catch (indexErr) {
+        console.warn('[VIETQR SMS] ⚠️ orderId index query failed, trying direct lookup...');
+      }
+
+      // Strategy 2: Search by description with VIP_ prefix
+      if (!pendingOrders || pendingOrders.empty) {
+        const descWithPrefix = `VIP_${parsedSms.memo}`;
+        console.log('[VIETQR SMS] 🔍 Searching by description:', descWithPrefix);
+        try {
+          pendingOrders = await db.collectionGroup('orders')
+            .where('description', '==', descWithPrefix)
+            .where('status', '==', 'pending')
+            .limit(1)
+            .get();
+        } catch (indexErr) {
+          console.warn('[VIETQR SMS] ⚠️ description index query failed');
+        }
+      }
+
+      // Strategy 3: Search by description with PRO_ prefix
+      if (!pendingOrders || pendingOrders.empty) {
+        const descWithPrefix = `PRO_${parsedSms.memo}`;
+        console.log('[VIETQR SMS] 🔍 Searching by description (PRO):', descWithPrefix);
+        try {
+          pendingOrders = await db.collectionGroup('orders')
+            .where('description', '==', descWithPrefix)
+            .where('status', '==', 'pending')
+            .limit(1)
+            .get();
+        } catch (indexErr) {
+          console.warn('[VIETQR SMS] ⚠️ PRO description index query failed');
+        }
+      }
     }
 
-    // If no memo match or no memo found, fallback to amount-based search (only if amount is valid)
+    // Fallback: Search by exact amount
     if ((!pendingOrders || pendingOrders.empty) && parsedSms.amount > 0) {
       console.log('[VIETQR SMS] 🔍 Searching by exact amount (fallback):', parsedSms.amount);
-      pendingOrders = await db.collectionGroup('orders')
-        .where('status', '==', 'pending')
-        .where('amount', '==', parsedSms.amount)
-        .limit(1)
-        .get();
+      try {
+        pendingOrders = await db.collectionGroup('orders')
+          .where('status', '==', 'pending')
+          .where('amount', '==', parsedSms.amount)
+          .limit(1)
+          .get();
+      } catch (indexErr) {
+        console.warn('[VIETQR SMS] ⚠️ amount index query failed');
+      }
     }
 
     if (!pendingOrders || pendingOrders.empty) {
@@ -978,24 +1017,49 @@ router.post('/sms-received', async (req, res) => {
  */
 function parseSmsContent(message) {
   try {
-    // 💰 Pattern 1: Amount (e.g., "2000d", "2.000đ", "GD: +50,000 VND")
-    const amountMatch = message.match(/([\d\.,]+)\s?[dđv]/i);
+    console.log('[SMS Parse] Raw message:', message.substring(0, 200));
+
+    // 💰 Pattern 1: Amount
+    // Matches: "2,000VND", "+2.000đ", "so tien 50000d", "GD: +50,000 VND", "2000 VND"
     let amount = 0;
-    if (amountMatch) {
-      // Remove dots and commas, parse as integer
-      amount = parseInt(amountMatch[1].replace(/[\.,]/g, ''), 10);
+    const amountPatterns = [
+      /([\d][\d\.,]+)\s*(?:VND|vnd)/i,           // 2,000VND or 2000 VND
+      /(?:\+|CD\s*)([\d][\d\.,]+)\s*[dđ]/i,       // +2.000đ or CD 2000d
+      /(?:so\s*tien|GD)[:\s]*\+?([\d][\d\.,]+)/i, // so tien 2000 or GD: +2000
+      /([\d][\d\.,]+)\s*[dđ](?:\b|$)/i,            // 2000d at word boundary
+    ];
+    for (const pattern of amountPatterns) {
+      const match = message.match(pattern);
+      if (match) {
+        amount = parseInt(match[1].replace(/[\.,]/g, ''), 10);
+        if (amount > 0) break;
+      }
     }
 
-    // 📝 Pattern 2: Memo/Description (e.g., "VIP_ORDABC123", "PRO_ORDXYZ")
-    // Look for patterns like XXX_ORDYYY or just ORDYYY
-    const memoMatch = message.match(/([A-Z0-9]+_ORD[A-Z0-9]+|ORD[A-Z0-9]{5,})/i);
-    const memo = memoMatch ? memoMatch[1].toUpperCase() : null;
+    // 📝 Pattern 2: Order ID / Memo
+    // Extract just the ORDxxx part (without VIP_ or PRO_ prefix)
+    // This is the orderId we store in Firestore
+    let memo = null;
+    const memoPatterns = [
+      /(?:VIP|PRO)_(ORD[A-Z0-9]{5,})/i,          // VIP_ORDxxx → capture ORDxxx
+      /(ORD[A-Z0-9]{5,})/i,                       // ORDxxx directly
+      /(?:ND|noi dung)[:\s]*.*?(ORD[A-Z0-9]{5,})/i, // ND: ... ORDxxx
+    ];
+    for (const pattern of memoPatterns) {
+      const match = message.match(pattern);
+      if (match) {
+        memo = match[1].toUpperCase();
+        break;
+      }
+    }
 
-    // 🏦 Pattern 3: Account (e.g., "TK *8394" or "TK 1018395984")
+    // 🏦 Pattern 3: Account
     const accountMatch = message.match(/TK\s*([*\d]+)/i);
     const account = accountMatch ? accountMatch[1] : 'unknown';
 
-    // We strictly need at least one of (amount > 0) OR (memo found)
+    console.log('[SMS Parse] Result:', { amount, account, memo });
+
+    // We need at least one useful piece of data
     if ((amount && amount > 0) || memo) {
       return { amount, account, memo };
     }
