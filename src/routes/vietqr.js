@@ -687,55 +687,135 @@ router.post('/webhook/banking', async (req, res) => {
   }
 });
 
+// ==============================================================
+// SECURITY INFRASTRUCTURE
+// ==============================================================
+const smsRateLimiter = new Map();
+const SMS_RATE_LIMIT = 10;
+const SMS_RATE_WINDOW = 60 * 1000;
+
+function checkSmsRateLimit(key) {
+  const now = Date.now();
+  const entry = smsRateLimiter.get(key);
+  if (!entry || now > entry.resetAt) {
+    smsRateLimiter.set(key, { count: 1, resetAt: now + SMS_RATE_WINDOW });
+    return true;
+  }
+  if (entry.count >= SMS_RATE_LIMIT) return false;
+  entry.count++;
+  return true;
+}
+
+const processedNonces = new Set();
+setInterval(() => processedNonces.clear(), 15 * 60 * 1000); // 15 min memory cache
+
+async function checkAndStoreNonce(nonce, deviceId) {
+  if (!nonce) return true;
+  if (processedNonces.has(nonce)) return false;
+
+  const nonceRef = db.collection('security_nonces').doc(nonce);
+  const nonceDoc = await nonceRef.get();
+  if (nonceDoc.exists) {
+    processedNonces.add(nonce);
+    return false;
+  }
+
+  await nonceRef.set({
+    deviceId: deviceId || 'unknown',
+    createdAt: Timestamp.now(),
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24h retention
+  });
+
+  processedNonces.add(nonce);
+  return true;
+}
+
+function getAuthorizedDeviceKeys() {
+  const keys = process.env.DEVICE_API_KEYS || process.env.SMS_DEVICE_API_KEY || '';
+  if (!keys) return null;
+  return keys.split(',').map(k => k.trim()).filter(Boolean);
+}
+
 /**
  * POST /vietqr/sms-received
- * SMS Banking Reader - Secure SMS-based payment verification
- * 
- * Flow:
- * 1. Android SMS Reader receives SMS from Vietcombank
- * 2. Reader parses SMS: amount, account, timestamp
- * 3. Reader generates HMAC-SHA256 signature for secure transmission
- * 4. Reader POSTs SMS to this endpoint with signature
- * 5. Server verifies signature (only valid SMS from authorized device)
- * 6. Server extracts amount and finds matching pending order
- * 7. Server verifies amount matches
- * 8. Server updates order status = 'completed'
- * 9. Server credits coins (idempotent - never twice)
- * 10. App polling detects within 3-6 seconds
- * 
- * Security:
- * - HMAC-SHA256 signature verification (SMS_READER_SECRET)
- * - Amount matching (prevents wrong SMS)
- * - Idempotency check (prevents duplicate coins)
- * - Never trusts client user input
+ * Secure SMS-based payment verification with multi-layer security:
+ * - Device API Key authentication (X-Device-Key header)
+ * - HMAC-SHA256 signature verification
+ * - Timestamp freshness check (reject > 5min old)
+ * - Nonce-based replay protection
+ * - Rate limiting (10 req/min/device)
+ * - OrderID-only matching (no amount-only fallback)
+ * - Full security audit logging
+ * - Idempotency checks
  */
 router.post('/sms-received', async (req, res) => {
   try {
-    const { smsContent, timestamp, signature, deviceId } = req.body;
+    const { smsContent, timestamp, signature, deviceId, nonce } = req.body;
+    const deviceApiKey = req.headers['x-device-key'] || req.body.deviceApiKey;
+    const requestIp = req.ip || req.connection?.remoteAddress || 'unknown';
 
-    console.log('[VIETQR SMS] Received SMS verification request');
+    console.log('[VIETQR SMS] 📥 Request from device:', deviceId, '| IP:', requestIp);
 
     // ============================================================
     // 1. Validate input
     // ============================================================
     if (!smsContent || !timestamp || !signature) {
-      console.error('[VIETQR SMS] Missing required fields');
-      return res.status(400).json({
-        success: false,
-        message: 'Missing smsContent, timestamp, or signature'
-      });
+      return res.status(400).json({ success: false, message: 'Missing required fields' });
     }
 
     // ============================================================
-    // 2. Verify HMAC-SHA256 signature
+    // 2. SECURITY: Device API Key authentication
+    // ============================================================
+    const authorizedKeys = getAuthorizedDeviceKeys();
+    if (authorizedKeys && authorizedKeys.length > 0) {
+      if (!deviceApiKey || !authorizedKeys.includes(deviceApiKey)) {
+        console.error('[SECURITY] 🚫 Invalid Device API Key from:', requestIp);
+        try {
+          await db.collection('security_logs').add({
+            type: 'unauthorized_device', deviceId: deviceId || 'unknown',
+            ip: requestIp, timestamp: Timestamp.now(),
+          });
+        } catch (e) { }
+        return res.status(403).json({ success: false, message: 'Unauthorized device' });
+      }
+      console.log('[SECURITY] ✅ Device API Key verified');
+    }
+
+    // ============================================================
+    // 3. SECURITY: Rate limiting (10 req/min per device)
+    // ============================================================
+    if (!checkSmsRateLimit(deviceId || requestIp)) {
+      console.warn('[SECURITY] 🚫 Rate limit exceeded:', deviceId);
+      return res.status(429).json({ success: false, message: 'Too many requests' });
+    }
+
+    // ============================================================
+    // 4. SECURITY: Timestamp freshness (reject > 5 min old)
+    // ============================================================
+    const now = Math.floor(Date.now() / 1000);
+    const timeDiff = Math.abs(now - timestamp);
+    if (timeDiff > 5 * 60) {
+      console.error('[SECURITY] ⏰ Timestamp too old:', timeDiff + 's drift');
+      return res.status(400).json({ success: false, message: 'Request expired' });
+    }
+
+    // ============================================================
+    // 5. SECURITY: Nonce replay protection (Persistent)
+    // ============================================================
+    if (nonce) {
+      const isNonceValid = await checkAndStoreNonce(nonce, deviceId);
+      if (!isNonceValid) {
+        console.error('[SECURITY] 🔄 Replay attack! Nonce reused:', nonce);
+        return res.status(400).json({ success: false, message: 'Duplicate request detected' });
+      }
+    }
+
+    // ============================================================
+    // 6. Verify HMAC-SHA256 signature
     // ============================================================
     const smsReaderSecret = process.env.SMS_READER_SECRET;
     if (!smsReaderSecret) {
-      console.error('[VIETQR SMS] SMS_READER_SECRET not configured');
-      return res.status(500).json({
-        success: false,
-        message: 'Server configuration error'
-      });
+      return res.status(500).json({ success: false, message: 'Server config error' });
     }
 
     const data = `${smsContent}|${timestamp}`;
@@ -745,18 +825,17 @@ router.post('/sms-received', async (req, res) => {
       .digest('hex');
 
     if (signature !== expectedSignature) {
-      console.error('[VIETQR SMS] ❌ Signature mismatch - invalid SMS or device');
-      console.error('[VIETQR SMS]', {
-        expected: expectedSignature.substring(0, 16) + '...',
-        received: signature.substring(0, 16) + '...'
-      });
-      return res.status(401).json({
-        success: false,
-        message: 'Signature verification failed'
-      });
+      console.error('[SECURITY] ❌ Signature mismatch - forgery attempt');
+      try {
+        await db.collection('security_logs').add({
+          type: 'signature_mismatch', deviceId: deviceId || 'unknown',
+          ip: requestIp, timestamp: Timestamp.now(),
+        });
+      } catch (e) { }
+      return res.status(401).json({ success: false, message: 'Signature failed' });
     }
 
-    console.log('[VIETQR SMS] ✅ Signature verified');
+    console.log('[VIETQR SMS] ✅ All security checks passed');
 
     // ============================================================
     // 3. Parse SMS content
@@ -777,69 +856,55 @@ router.post('/sms-received', async (req, res) => {
     });
 
     // ============================================================
-    // 4. Find matching pending order
-    // Priorities: 
-    // a) Search by unique memo (description) if found
-    // b) Fallback to search by amount (less reliable)
+    // 8. SECURITY: Require memo/orderId - no amount-only matching
+    //    Amount-only is dangerous: two orders with same amount
+    //    could be swapped by an attacker.
+    // ============================================================
+    if (!parsedSms.memo) {
+      console.warn('[SECURITY] ⚠️ No order ID in SMS - rejecting for safety');
+      return res.status(400).json({
+        success: false,
+        message: 'No order ID (ORDxxx) found in notification. Cannot verify securely.'
+      });
+    }
+
+    // ============================================================
+    // 9. Find matching pending order (orderId-based only)
     // ============================================================
     let pendingOrders;
 
-    if (parsedSms.memo) {
-      // Strategy 1: Search by orderId field (memo = ORDxxx, orderId = ORDxxx)
-      console.log('[VIETQR SMS] 🔍 Searching by orderId:', parsedSms.memo);
-      try {
-        pendingOrders = await db.collectionGroup('orders')
-          .where('orderId', '==', parsedSms.memo)
-          .where('status', '==', 'pending')
-          .limit(1)
-          .get();
-      } catch (indexErr) {
-        console.warn('[VIETQR SMS] ⚠️ orderId index query failed, trying direct lookup...');
-      }
-
-      // Strategy 2: Search by description with VIP_ prefix
-      if (!pendingOrders || pendingOrders.empty) {
-        const descWithPrefix = `VIP_${parsedSms.memo}`;
-        console.log('[VIETQR SMS] 🔍 Searching by description:', descWithPrefix);
-        try {
-          pendingOrders = await db.collectionGroup('orders')
-            .where('description', '==', descWithPrefix)
-            .where('status', '==', 'pending')
-            .limit(1)
-            .get();
-        } catch (indexErr) {
-          console.warn('[VIETQR SMS] ⚠️ description index query failed');
-        }
-      }
-
-      // Strategy 3: Search by description with PRO_ prefix
-      if (!pendingOrders || pendingOrders.empty) {
-        const descWithPrefix = `PRO_${parsedSms.memo}`;
-        console.log('[VIETQR SMS] 🔍 Searching by description (PRO):', descWithPrefix);
-        try {
-          pendingOrders = await db.collectionGroup('orders')
-            .where('description', '==', descWithPrefix)
-            .where('status', '==', 'pending')
-            .limit(1)
-            .get();
-        } catch (indexErr) {
-          console.warn('[VIETQR SMS] ⚠️ PRO description index query failed');
-        }
-      }
+    // Strategy 1: Search by orderId field
+    console.log('[VIETQR SMS] 🔍 Searching by orderId:', parsedSms.memo);
+    try {
+      pendingOrders = await db.collectionGroup('orders')
+        .where('orderId', '==', parsedSms.memo)
+        .where('status', '==', 'pending')
+        .limit(1)
+        .get();
+    } catch (indexErr) {
+      console.warn('[VIETQR SMS] ⚠️ orderId index query failed');
     }
 
-    // Fallback: Search by exact amount
-    if ((!pendingOrders || pendingOrders.empty) && parsedSms.amount > 0) {
-      console.log('[VIETQR SMS] 🔍 Searching by exact amount (fallback):', parsedSms.amount);
+    // Strategy 2: Search by description with VIP_ prefix
+    if (!pendingOrders || pendingOrders.empty) {
       try {
         pendingOrders = await db.collectionGroup('orders')
+          .where('description', '==', `VIP_${parsedSms.memo}`)
           .where('status', '==', 'pending')
-          .where('amount', '==', parsedSms.amount)
           .limit(1)
           .get();
-      } catch (indexErr) {
-        console.warn('[VIETQR SMS] ⚠️ amount index query failed');
-      }
+      } catch (indexErr) { }
+    }
+
+    // Strategy 3: Search by description with PRO_ prefix
+    if (!pendingOrders || pendingOrders.empty) {
+      try {
+        pendingOrders = await db.collectionGroup('orders')
+          .where('description', '==', `PRO_${parsedSms.memo}`)
+          .where('status', '==', 'pending')
+          .limit(1)
+          .get();
+      } catch (indexErr) { }
     }
 
     if (!pendingOrders || pendingOrders.empty) {
@@ -913,6 +978,12 @@ router.post('/sms-received', async (req, res) => {
     // ============================================================
     // 8. Update order status to completed
     // ============================================================
+    // SECURITY: Check order expiration
+    if (orderData.expiresAt && now > orderData.expiresAt) {
+      console.warn('[VIETQR SMS] ⏰ Order expired:', orderId);
+      return res.status(400).json({ success: false, message: 'Order expired' });
+    }
+
     const orderRef = db.collection('users').doc(uid).collection('orders').doc(orderId);
 
     await orderRef.update({
@@ -921,7 +992,12 @@ router.post('/sms-received', async (req, res) => {
       verifiedAt: Timestamp.now(),
       smsCode: smsCode,
       processedSmsCodes: admin.firestore.FieldValue.arrayUnion(smsCode),
-      smsContent: smsContent.substring(0, 100) // Store truncated SMS for audit
+      smsContent: smsContent.substring(0, 100),
+      verifiedBy: {
+        deviceId: deviceId || 'unknown',
+        ip: requestIp,
+        timestamp: now,
+      }
     });
 
     console.log('[VIETQR SMS] ✅ Order status updated to completed');
@@ -1020,31 +1096,31 @@ function parseSmsContent(message) {
     console.log('[SMS Parse] Raw message:', message.substring(0, 200));
 
     // 💰 Pattern 1: Amount
-    // Matches: "2,000VND", "+2.000đ", "so tien 50000d", "GD: +50,000 VND", "2000 VND"
+    // Matches: "2,000VND", "+2.000đ", "so tien 50000d", "GD: +50,000 VND", "2000 VND", "2.000"
     let amount = 0;
     const amountPatterns = [
-      /([\d][\d\.,]+)\s*(?:VND|vnd)/i,           // 2,000VND or 2000 VND
-      /(?:\+|CD\s*)([\d][\d\.,]+)\s*[dđ]/i,       // +2.000đ or CD 2000d
-      /(?:so\s*tien|GD)[:\s]*\+?([\d][\d\.,]+)/i, // so tien 2000 or GD: +2000
-      /([\d][\d\.,]+)\s*[dđ](?:\b|$)/i,            // 2000d at word boundary
+      /([\d][\d\.,]{3,})\s*(?:VND|vnd|đ|d)/i,      // 2,000VND or 2000 đ
+      /(?:\+|CD\s*|so\s*tien\s*|GD[:\s]*\+?)([\d][\d\.,]{3,})/i, // +2.000 or so tien 2.000
+      /([\d][\d\.,]{3,})(?:\s*[dđv]|\s*$)/i,       // 2.000d or just 2.000 at end
     ];
     for (const pattern of amountPatterns) {
       const match = message.match(pattern);
       if (match) {
         amount = parseInt(match[1].replace(/[\.,]/g, ''), 10);
-        if (amount > 0) break;
+        if (amount >= 1000) break; // Most VCB payments are >= 1000
       }
     }
 
     // 📝 Pattern 2: Order ID / Memo
     // Extract just the ORDxxx part (without VIP_ or PRO_ prefix)
-    // This is the orderId we store in Firestore
     let memo = null;
     const memoPatterns = [
-      /(?:VIP|PRO)_(ORD[A-Z0-9]{5,})/i,          // VIP_ORDxxx → capture ORDxxx
-      /(ORD[A-Z0-9]{5,})/i,                       // ORDxxx directly
-      /(?:ND|noi dung)[:\s]*.*?(ORD[A-Z0-9]{5,})/i, // ND: ... ORDxxx
+      /(?:VIP|PRO)[-_](ORD[A-Z0-9]{5,})/i,       // VIP-ORDxxx or VIP_ORDxxx
+      /(ORD[A-Z0-9]{5,})/i,                      // ORDxxx directly
+      /(?:ND|noi\s*dung|noidung)[:\s-]*.*?(ORD[A-Z0-9]{5,})/i, // ND: ... ORDxxx
+      /([A-Z0-9]{5,})(?:\s*$|\s+)/i,             // Fallback to any uppercase code if it's the only one
     ];
+
     for (const pattern of memoPatterns) {
       const match = message.match(pattern);
       if (match) {
@@ -1229,5 +1305,36 @@ function startPollingService() {
 
 // Start polling when module loads
 startPollingService();
+
+/**
+ * POST /vietqr/report-issue
+ * Report an issue with payment (manual report)
+ */
+router.post('/report-issue', async (req, res) => {
+  try {
+    const uid = await verifyAuth(req);
+    const { orderId, issueType, message, amount, description } = req.body;
+
+    console.log('[VIETQR] Issue reported:', { uid, orderId, issueType });
+
+    const reportRef = db.collection('payment_reports').doc();
+    await reportRef.set({
+      id: reportRef.id,
+      uid,
+      orderId: orderId || 'N/A',
+      issueType: issueType || 'payment_not_received',
+      message: message || '',
+      amount: amount || 0,
+      description: description || '',
+      status: 'pending',
+      createdAt: Timestamp.now(),
+    });
+
+    res.json({ success: true, message: 'Report submitted successfully' });
+  } catch (error) {
+    console.error('[VIETQR] report-issue error:', error);
+    res.status(500).json({ success: false, error: 'Failed to submit report' });
+  }
+});
 
 module.exports = router;
