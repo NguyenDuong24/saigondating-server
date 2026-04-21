@@ -1,17 +1,19 @@
-/**
+﻿/**
  * VietQR Payment Routes
- * Xử lý thanh toán VietQR cho nạp coin và nâng cấp Pro
- * Hỗ trợ Webhook + Auto Polling để tự động verify thanh toán
+ * Xá»­ lÃ½ thanh toÃ¡n VietQR cho náº¡p coin vÃ  nÃ¢ng cáº¥p Pro
+ * Há»— trá»£ Webhook + Auto Polling Ä‘á»ƒ tá»± Ä‘á»™ng verify thanh toÃ¡n
  */
 
 const express = require('express');
 const crypto = require('crypto');
-const { getFirestore, Timestamp } = require('firebase-admin/firestore');
-const { getAuth } = require('firebase-admin/auth');
+const { getFirestore, Timestamp, FieldValue } = require('firebase-admin/firestore');
 const admin = require('firebase-admin');
+const authMiddleware = require('../middleware/auth');
+const { createIdempotencyMiddleware } = require('../middleware/idempotency');
 
 const router = express.Router();
 const db = getFirestore();
+const idempotency = createIdempotencyMiddleware();
 
 // Track polling intervals
 const pollingIntervals = new Map();
@@ -21,33 +23,46 @@ const pollingIntervals = new Map();
 // ==============================================================
 const VIETQR_CONFIG = {
   bankCode: 970436, // Vietcombank
-  accountNumber: process.env.VIETQR_ACCOUNT || '1018395984',
-  accountName: process.env.VIETQR_ACCOUNT_NAME || 'Nguyen Thai Duong',
+  accountNumber: process.env.VIETQR_ACCOUNT || '',
+  accountName: process.env.VIETQR_ACCOUNT_NAME || '',
   template: process.env.VIETQR_TEMPLATE || 'compact', // or 'compact2'
 };
+
+const DEFAULT_COIN_PACKAGES = [
+  { id: 'coin_10', coins: 10, price: 1000 },
+  { id: 'coin_50', coins: 50, price: 2000 },
+  { id: 'coin_100', coins: 100, price: 3000 },
+  { id: 'coin_500', coins: 500, price: 5000 },
+];
+
+function getServerCoinPackages() {
+  try {
+    if (process.env.VIETQR_COIN_PACKAGES) {
+      const parsed = JSON.parse(process.env.VIETQR_COIN_PACKAGES);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (e) {
+    console.warn('[VIETQR] Invalid VIETQR_COIN_PACKAGES env, using defaults');
+  }
+  return DEFAULT_COIN_PACKAGES;
+}
+
+function getPackageById(packageId) {
+  if (!packageId) return null;
+  return getServerCoinPackages().find((p) => p && p.id === packageId) || null;
+}
+
+function isValidOrderId(orderId) {
+  return typeof orderId === 'string' && /^ORD[A-Z0-9]{4,40}$/i.test(orderId);
+}
+
+function isValidPaymentDescription(description) {
+  return typeof description === 'string' && /^(VIP|PRO)_ORD[A-Z0-9]{4,40}$/i.test(description);
+}
 
 // ==============================================================
 // Helper Functions
 // ==============================================================
-
-/**
- * Verify Firebase auth token
- */
-async function verifyAuth(req) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    throw { status: 401, message: 'No token provided' };
-  }
-
-  const idToken = authHeader.split('Bearer ')[1];
-  try {
-    const decodedToken = await getAuth().verifyIdToken(idToken);
-    return decodedToken.uid;
-  } catch (verifyError) {
-    console.error('[VIETQR] verifyIdToken failed:', verifyError);
-    throw { status: 401, message: 'Invalid auth token' };
-  }
-}
 
 /**
  * Verify webhook signature from banking provider
@@ -55,8 +70,8 @@ async function verifyAuth(req) {
 function verifyWebhookSignature(payload, signature) {
   const webhookSecret = process.env.WEBHOOK_SECRET;
   if (!webhookSecret) {
-    console.warn('[VIETQR] WEBHOOK_SECRET not configured, skipping signature verification');
-    return true;
+    console.error('[VIETQR] WEBHOOK_SECRET not configured');
+    return false;
   }
 
   const expectedSignature = crypto
@@ -104,78 +119,102 @@ async function sendPushNotification(uid, { title, body, data }) {
 /**
  * Complete a payment order and add coins/pro to user
  */
-async function completePaymentOrder(orderId, order) {
+async function completePaymentOrder(orderId, order, options = {}) {
   try {
     const orderRef = db.collection('users').doc(order.uid).collection('orders').doc(orderId);
+    const nowTs = Timestamp.now();
+    const verificationMethod = options.method || 'webhook';
+    const verificationDescription = options.description || null;
+    let result = { success: true, orderId, status: 'completed', alreadyProcessed: false };
 
-    // Update order status
-    await orderRef.update({
-      status: 'completed',
-      completedAt: Timestamp.now(),
-      autoVerified: true,
-    });
+    await db.runTransaction(async (transaction) => {
+      const orderSnap = await transaction.get(orderRef);
+      if (!orderSnap.exists) {
+        throw { status: 404, message: 'Order not found' };
+      }
 
-    console.log('[VIETQR] Order completed:', orderId);
+      const orderData = orderSnap.data() || {};
+      if (orderData.status === 'completed') {
+        result = { success: true, orderId, status: 'completed', alreadyProcessed: true };
+        return;
+      }
+      if (orderData.status !== 'pending') {
+        throw { status: 409, message: `Order is ${orderData.status}` };
+      }
 
-    // Add coins or Pro based on product type
-    if (order.product === 'coin') {
-      const walletRef = db.collection('users').doc(order.uid).collection('wallet').doc('balance');
+      if (orderData.product === 'coin') {
+        const coinAmount = Number(orderData?.coinPackage?.amount || 0);
+        if (!Number.isFinite(coinAmount) || coinAmount <= 0) {
+          throw { status: 400, message: 'Invalid coin package in order' };
+        }
+        const walletRef = db.collection('users').doc(order.uid).collection('wallet').doc('balance');
+        const txRef = db.collection('users').doc(order.uid).collection('wallet').collection('transactions').doc(`vietqr_${orderId}`);
+        const walletSnap = await transaction.get(walletRef);
+        const currentCoins = Number(walletSnap.exists ? (walletSnap.data().coins || 0) : 0);
+        const newCoins = currentCoins + coinAmount;
 
-      await db.runTransaction(async (transaction) => {
-        const walletDoc = await transaction.get(walletRef);
-        const currentCoins = walletDoc.exists ? (walletDoc.data().coins || 0) : 0;
-        const newCoins = currentCoins + order.coinPackage.amount;
-
-        transaction.update(walletRef, {
-          coins: newCoins,
-          lastUpdate: Timestamp.now(),
-        });
-
-        // Create transaction record
-        const transactionRef = db.collection('users').doc(order.uid).collection('wallet').collection('transactions').doc();
-        transaction.set(transactionRef, {
-          id: transactionRef.id,
+        transaction.set(walletRef, { coins: newCoins, lastUpdate: nowTs }, { merge: true });
+        transaction.set(txRef, {
+          id: txRef.id,
           type: 'topup_vietqr',
-          amount: order.coinPackage.amount,
-          price: order.amount,
+          amount: coinAmount,
+          price: orderData.amount,
           currencyType: 'coin',
-          createdAt: Timestamp.now(),
+          createdAt: nowTs,
           orderId: orderId,
           status: 'completed',
           metadata: {
-            source: 'vietqr_webhook',
-            autoVerified: true,
+            source: `vietqr_${verificationMethod}`,
+            autoVerified: verificationMethod !== 'manual',
           },
+        }, { merge: true });
+
+        result.coinsAdded = coinAmount;
+        result.newBalance = newCoins;
+      } else if (orderData.product === 'pro_upgrade') {
+        const userRef = db.collection('users').doc(order.uid);
+        const proExpiry = new Date();
+        proExpiry.setMonth(proExpiry.getMonth() + 1);
+        transaction.set(userRef, {
+          isPro: true,
+          proExpiresAt: Timestamp.fromDate(proExpiry),
+          proActivatedAt: nowTs,
+          lastProPaymentDate: nowTs,
+        }, { merge: true });
+        result.proStatus = 'activated';
+        result.proExpiresAt = proExpiry.toISOString();
+      } else {
+        throw { status: 400, message: 'Invalid order product type' };
+      }
+
+      transaction.update(orderRef, {
+        status: 'completed',
+        completedAt: nowTs,
+        autoVerified: verificationMethod !== 'manual',
+        verificationMethod,
+        verificationDescription,
+        processedTxnIds: FieldValue.arrayUnion(`ORDER_${orderId}`),
+      });
+    });
+
+    if (!result.alreadyProcessed) {
+      console.log('[VIETQR] Order completed:', orderId);
+      if (result.coinsAdded) {
+        await sendPushNotification(order.uid, {
+          title: 'Payment completed',
+          body: `You received ${result.coinsAdded} coins`,
+          data: { orderId, coins: result.coinsAdded },
         });
-      });
-
-      // Send notification
-      await sendPushNotification(order.uid, {
-        title: '✅ Nạp xu thành công',
-        body: `Bạn đã nhận được ${order.coinPackage.amount} xu!`,
-        data: { orderId, coins: order.coinPackage.amount },
-      });
-    } else if (order.product === 'pro_upgrade') {
-      const userRef = db.collection('users').doc(order.uid);
-      const proExpiry = new Date();
-      proExpiry.setMonth(proExpiry.getMonth() + 1);
-
-      await userRef.update({
-        isPro: true,
-        proExpiresAt: Timestamp.fromDate(proExpiry),
-        proActivatedAt: Timestamp.now(),
-        lastProPaymentDate: Timestamp.now(),
-      });
-
-      // Send notification
-      await sendPushNotification(order.uid, {
-        title: '✅ Nâng cấp Pro thành công',
-        body: 'Bạn đã trở thành thành viên Pro!',
-        data: { orderId, proExpiresAt: proExpiry.toISOString() },
-      });
+      } else if (result.proStatus === 'activated') {
+        await sendPushNotification(order.uid, {
+          title: 'Pro upgrade completed',
+          body: 'Your Pro plan is now active',
+          data: { orderId, proExpiresAt: result.proExpiresAt },
+        });
+      }
     }
 
-    return true;
+    return result;
   } catch (error) {
     console.error('[VIETQR] Error completing payment order:', error);
     throw error;
@@ -297,18 +336,27 @@ async function verifyPaymentDescription(uid, description, orderId) {
  *   "productType": "VIP" | "PRO" // for metadata
  * }
  */
-router.post('/create-payment', async (req, res) => {
+router.post('/create-payment', authMiddleware, idempotency, async (req, res) => {
   try {
-    const uid = await verifyAuth(req);
+    const uid = req.user.uid;
     console.log('[VIETQR] Creating payment for uid:', uid);
 
     const { product, coinPackage, productType = 'VIP' } = req.body;
+    const normalizedProductType = String(productType || 'VIP').toUpperCase();
+    if (!VIETQR_CONFIG.accountNumber || !VIETQR_CONFIG.accountName) {
+      throw { status: 500, message: 'VietQR account configuration missing' };
+    }
 
     let amount, description, orderData;
 
     if (product === 'coin' && coinPackage) {
       // Coin purchase
-      amount = coinPackage.price;
+      const packageId = String(coinPackage.id || '').trim();
+      const serverPackage = getPackageById(packageId);
+      if (!serverPackage) {
+        throw { status: 400, message: 'Invalid coin package' };
+      }
+      amount = Number(serverPackage.price);
       const orderId = generateOrderId();
       const transactionCode = `VQR_${Date.now()}_${uid.substring(0, 8)}`;
       const expiresAt = Math.floor((Date.now() + 10 * 60 * 1000) / 1000);
@@ -317,12 +365,16 @@ router.post('/create-payment', async (req, res) => {
         uid,
         orderId,
         product: 'coin',
-        coinPackage,
-        productType,
+        coinPackage: {
+          id: serverPackage.id,
+          amount: Number(serverPackage.coins),
+          price: Number(serverPackage.price),
+        },
+        productType: normalizedProductType === 'PRO' ? 'PRO' : 'VIP',
         amount,
         status: 'pending',
         createdAt: Timestamp.now(),
-        description: `${productType}_${orderId}`,
+        description: `${normalizedProductType === 'PRO' ? 'PRO' : 'VIP'}_${orderId}`,
         transactionCode,
         expiresAt,
         processedTxnIds: [],
@@ -332,7 +384,10 @@ router.post('/create-payment', async (req, res) => {
       description = orderData.description;
     } else if (product === 'pro_upgrade') {
       // Pro upgrade (assumes fixed price)
-      amount = process.env.PRO_UPGRADE_PRICE || 99000;
+      amount = Number(process.env.PRO_UPGRADE_PRICE || 99000);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        throw { status: 500, message: 'Invalid PRO_UPGRADE_PRICE configuration' };
+      }
       const orderId = generateOrderId();
       const transactionCode = `VQR_${Date.now()}_${uid.substring(0, 8)}`;
       const expiresAt = Math.floor((Date.now() + 10 * 60 * 1000) / 1000);
@@ -367,7 +422,7 @@ router.post('/create-payment', async (req, res) => {
     console.log('[VIETQR] Order created:', orderData.orderId);
 
     // Generate VietQR string
-    const qrData = createVietQRString(amount, productType, orderData.orderId);
+    const qrData = createVietQRString(amount, orderData.productType, orderData.orderId);
 
     res.json({
       success: true,
@@ -384,8 +439,8 @@ router.post('/create-payment', async (req, res) => {
       qrString: qrData.qrString,
       // Instructions for user
       instructions: {
-        method1: 'Dùng ứng dụng ngân hàng để quét mã QR bên dưới',
-        method2: `Hoặc chuyển khoản thủ công: ${VIETQR_CONFIG.accountNumber} (${VIETQR_CONFIG.accountName}), nội dung: ${description}`,
+        method1: 'DÃ¹ng á»©ng dá»¥ng ngÃ¢n hÃ ng Ä‘á»ƒ quÃ©t mÃ£ QR bÃªn dÆ°á»›i',
+        method2: `Hoáº·c chuyá»ƒn khoáº£n thá»§ cÃ´ng: ${VIETQR_CONFIG.accountNumber} (${VIETQR_CONFIG.accountName}), ná»™i dung: ${description}`,
       },
     });
   } catch (error) {
@@ -407,9 +462,9 @@ router.post('/create-payment', async (req, res) => {
  *   "amount": 99000
  * }
  */
-router.post('/verify-payment', async (req, res) => {
+router.post('/verify-payment', authMiddleware, idempotency, async (req, res) => {
   try {
-    const uid = await verifyAuth(req);
+    const uid = req.user.uid;
     const { orderId, description, amount } = req.body;
 
     console.log('[VIETQR] Verifying payment:', { uid, orderId, description, amount });
@@ -420,12 +475,18 @@ router.post('/verify-payment', async (req, res) => {
         error: 'Missing orderId or description',
       });
     }
+    if (!isValidOrderId(String(orderId)) || !isValidPaymentDescription(String(description))) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid orderId or description format',
+      });
+    }
 
     // Verify the description format and order exists
     const orderInfo = await verifyPaymentDescription(uid, description, orderId);
 
     // Check amount matches
-    if (amount && amount !== orderInfo.amount) {
+    if (amount !== undefined && Number(amount) !== Number(orderInfo.amount)) {
       console.warn('[VIETQR] Amount mismatch:', { expected: orderInfo.amount, received: amount });
       return res.status(400).json({
         success: false,
@@ -445,100 +506,12 @@ router.post('/verify-payment', async (req, res) => {
     }
 
     const orderData = orderDoc.data();
-
-    // ✅ IDEMPOTENCY CHECK: Has this payment already been processed?
-    const txnId = `TXN_${Date.now()}_${uid.substring(0, 8)}`;
-    if (orderData.processedTxnIds && orderData.processedTxnIds.length > 0) {
-      console.log('[VIETQR] ⚠️ Order already processed, preventing duplicate:', orderId);
-      return res.json({
-        success: true,
-        orderId,
-        status: 'completed',
-        message: 'Payment already processed (idempotent)',
-        alreadyProcessed: true,
-      });
-    }
-
-    // Update order status to completed
-    await orderRef.update({
-      status: 'completed',
-      completedAt: Timestamp.now(),
-      verificationDescription: description,
-    });
-
-    // Process the order based on product type
-    let result = {
-      success: true,
+    const result = await completePaymentOrder(
       orderId,
-      status: 'completed',
-      message: 'Payment verified successfully',
-    };
-
-    if (orderData.product === 'coin') {
-      // Add coins to user wallet
-      const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
-
-      let transactionRef;
-      await db.runTransaction(async (transaction) => {
-        const walletDoc = await transaction.get(walletRef);
-        const currentCoins = walletDoc.exists ? (walletDoc.data().coins || 0) : 0;
-        const newCoins = currentCoins + orderData.coinPackage.amount;
-
-        transaction.update(walletRef, {
-          coins: newCoins,
-          lastUpdate: Timestamp.now(),
-        });
-
-        // Create transaction record
-        transactionRef = db.collection('users').doc(uid).collection('wallet').collection('transactions').doc();
-        transaction.set(transactionRef, {
-          id: transactionRef.id,
-          type: 'topup_vietqr',
-          amount: orderData.coinPackage.amount,
-          price: orderData.amount,
-          currencyType: 'coin',
-          createdAt: Timestamp.now(),
-          orderId: orderId,
-          transactionCode: orderData.transactionCode,
-          status: 'completed',
-          verificationMethod: 'manual',
-          metadata: {
-            source: 'vietqr',
-            description: description,
-          },
-        });
-      });
-
-      // ✅ Mark transaction as processed (idempotency check)
-      await orderRef.update({
-        processedTxnIds: admin.firestore.FieldValue.arrayUnion(txnId),
-      });
-
-      result.newBalance = (walletDoc?.data()?.coins || 0) + orderData.coinPackage.amount;
-      result.coinsAdded = orderData.coinPackage.amount;
-      result.message = `Thêm ${orderData.coinPackage.amount} coin thành công!`;
-    } else if (orderData.product === 'pro_upgrade') {
-      // Upgrade user to Pro
-      const userRef = db.collection('users').doc(uid);
-      const proExpiry = new Date();
-      proExpiry.setMonth(proExpiry.getMonth() + 1);
-
-      await userRef.update({
-        isPro: true,
-        proExpiresAt: Timestamp.fromDate(proExpiry),
-        proActivatedAt: Timestamp.now(),
-        lastProPaymentDate: Timestamp.now(),
-      });
-
-      // ✅ Mark transaction as processed (idempotency check)
-      await orderRef.update({
-        processedTxnIds: admin.firestore.FieldValue.arrayUnion(txnId),
-      });
-
-      result.proStatus = 'activated';
-      result.proExpiresAt = proExpiry.toISOString();
-      result.message = 'Nâng cấp Pro thành công!';
-    }
+      { uid, ...orderData },
+      { method: 'manual', description }
+    );
+    result.message = result.alreadyProcessed ? 'Payment already processed' : 'Payment verified successfully';
 
     console.log('[VIETQR] Payment verified and processed:', result);
     res.json(result);
@@ -554,10 +527,13 @@ router.post('/verify-payment', async (req, res) => {
  * GET /vietqr/order-status/:orderId
  * Check the status of an order
  */
-router.get('/order-status/:orderId', async (req, res) => {
+router.get('/order-status/:orderId', authMiddleware, async (req, res) => {
   try {
-    const uid = await verifyAuth(req);
+    const uid = req.user.uid;
     const { orderId } = req.params;
+    if (!isValidOrderId(String(orderId))) {
+      return res.status(400).json({ success: false, error: 'Invalid orderId' });
+    }
 
     const orderRef = db.collection('users').doc(uid).collection('orders').doc(orderId);
     const orderDoc = await orderRef.get();
@@ -612,34 +588,58 @@ router.get('/order-status/:orderId', async (req, res) => {
 
 /**
  * POST /vietqr/webhook/banking
- * Webhook từ ngân hàng nhận thông báo chuyển khoản
+ * Webhook tá»« ngÃ¢n hÃ ng nháº­n thÃ´ng bÃ¡o chuyá»ƒn khoáº£n
  * 
  * Body:
  * {
  *   "amount": 50000,           // VND
  *   "content": "VIP_ORD123456", // payment description
- *   "senderAccount": "0123456789", // tài khoản người gửi
- *   "timestamp": 1234567890    // ngân hàng timestamp
+ *   "senderAccount": "0123456789", // tÃ i khoáº£n ngÆ°á»i gá»­i
+ *   "timestamp": 1234567890    // ngÃ¢n hÃ ng timestamp
  * }
  */
 router.post('/webhook/banking', async (req, res) => {
   try {
-    // 🛡️ Verify webhook signature
+    // ðŸ›¡ï¸ Verify webhook signature
     const signature = req.headers['x-webhook-signature'];
-    if (signature && !verifyWebhookSignature(req.body, signature)) {
-      console.warn('[VIETQR] Invalid webhook signature');
+    if (!signature || !verifyWebhookSignature(req.body, signature)) {
+      console.warn('[VIETQR] Missing or invalid webhook signature');
       return res.status(401).json({ success: false, message: 'Invalid signature' });
     }
 
     const { amount, content, senderAccount, timestamp } = req.body;
+    const parsedAmount = Number(amount);
+    const parsedTimestamp = Number(timestamp);
 
-    console.log('[VIETQR] 🔔 Webhook received:', { amount, content, senderAccount });
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid amount' });
+    }
+    if (!Number.isFinite(parsedTimestamp)) {
+      return res.status(400).json({ success: false, message: 'Missing timestamp' });
+    }
+    const nowMs = Date.now();
+    const eventTsMs = parsedTimestamp > 10_000_000_000 ? parsedTimestamp : parsedTimestamp * 1000;
+    if (Math.abs(nowMs - eventTsMs) > 10 * 60 * 1000) {
+      return res.status(401).json({ success: false, message: 'Stale webhook event' });
+    }
 
-    if (!amount || !content) {
+    const rawEventKey = `${content}|${parsedAmount}|${parsedTimestamp}|${senderAccount || ''}`;
+    const webhookEventId = crypto.createHash('sha256').update(rawEventKey).digest('hex');
+    const webhookEventRef = db.collection('vietqr_webhook_events').doc(webhookEventId);
+    try {
+      await webhookEventRef.create({ createdAt: Timestamp.now(), content, amount: parsedAmount, timestamp: parsedTimestamp });
+    } catch (e) {
+      console.log('[VIETQR] Duplicate webhook ignored:', webhookEventId);
+      return res.status(200).json({ success: true, message: 'Duplicate webhook ignored' });
+    }
+
+    console.log('[VIETQR] ðŸ”” Webhook received:', { amount, content, senderAccount });
+
+    if (!parsedAmount || !content) {
       return res.status(400).json({ success: false, message: 'Missing amount or content' });
     }
 
-    // 🔍 Parse payment content: VIP_ORD123456 or PRO_ORD123456
+    // ðŸ” Parse payment content: VIP_ORD123456 or PRO_ORD123456
     const match = content.match(/^(VIP|PRO)_(.+)$/);
     if (!match) {
       return res.status(400).json({ success: false, message: 'Invalid content format' });
@@ -647,7 +647,7 @@ router.post('/webhook/banking', async (req, res) => {
 
     const [, productType, orderId] = match;
 
-    // 🔍 Find order in database
+    // ðŸ” Find order in database
     const ordersQuery = await db.collectionGroup('orders')
       .where('orderId', '==', orderId)
       .where('status', '==', 'pending')
@@ -664,22 +664,22 @@ router.post('/webhook/banking', async (req, res) => {
     const order = orderDoc.data();
     const uid = orderDoc.ref.parent.parent.id; // Get uid from path users/{uid}/orders
 
-    // ✅ Verify amount matches
-    if (order.amount !== amount) {
+    // âœ… Verify amount matches
+    if (Number(order.amount) !== parsedAmount) {
       console.warn('[VIETQR] Amount mismatch:', { expected: order.amount, received: amount });
       return res.status(200).json({ success: false, message: 'Amount mismatch' });
     }
 
-    // ✅ Verify product type matches
+    // âœ… Verify product type matches
     if (order.productType !== productType) {
       console.warn('[VIETQR] Product type mismatch:', { expected: order.productType, received: productType });
       return res.status(200).json({ success: false, message: 'Product type mismatch' });
     }
 
-    // 💰 Complete the order
-    await completePaymentOrder(orderId, { uid, ...order });
+    // ðŸ’° Complete the order
+    await completePaymentOrder(orderId, { uid, ...order }, { method: 'webhook', description: content });
 
-    console.log('[VIETQR] ✅ Payment auto-verified via webhook:', orderId);
+    console.log('[VIETQR] âœ… Payment auto-verified via webhook:', orderId);
     res.status(200).json({ success: true, message: 'Payment verified and processed' });
 
   } catch (error) {
@@ -755,7 +755,7 @@ router.post('/sms-received', async (req, res) => {
     const deviceApiKey = req.headers['x-device-key'] || req.body.deviceApiKey;
     const requestIp = req.ip || req.connection?.remoteAddress || 'unknown';
 
-    console.log('[VIETQR SMS] 📥 Request from device:', deviceId, '| IP:', requestIp);
+    console.log('[VIETQR SMS] ðŸ“¥ Request from device:', deviceId, '| IP:', requestIp);
 
     // ============================================================
     // 1. Validate input
@@ -770,7 +770,7 @@ router.post('/sms-received', async (req, res) => {
     const authorizedKeys = getAuthorizedDeviceKeys();
     if (authorizedKeys && authorizedKeys.length > 0) {
       if (!deviceApiKey || !authorizedKeys.includes(deviceApiKey)) {
-        console.error('[SECURITY] 🚫 Invalid Device API Key from:', requestIp);
+        console.error('[SECURITY] ðŸš« Invalid Device API Key from:', requestIp);
         try {
           await db.collection('security_logs').add({
             type: 'unauthorized_device', deviceId: deviceId || 'unknown',
@@ -779,14 +779,14 @@ router.post('/sms-received', async (req, res) => {
         } catch (e) { }
         return res.status(403).json({ success: false, message: 'Unauthorized device' });
       }
-      console.log('[SECURITY] ✅ Device API Key verified');
+      console.log('[SECURITY] âœ… Device API Key verified');
     }
 
     // ============================================================
     // 3. SECURITY: Rate limiting (10 req/min per device)
     // ============================================================
     if (!checkSmsRateLimit(deviceId || requestIp)) {
-      console.warn('[SECURITY] 🚫 Rate limit exceeded:', deviceId);
+      console.warn('[SECURITY] ðŸš« Rate limit exceeded:', deviceId);
       return res.status(429).json({ success: false, message: 'Too many requests' });
     }
 
@@ -796,7 +796,7 @@ router.post('/sms-received', async (req, res) => {
     const now = Math.floor(Date.now() / 1000);
     const timeDiff = Math.abs(now - timestamp);
     if (timeDiff > 5 * 60) {
-      console.error('[SECURITY] ⏰ Timestamp too old:', timeDiff + 's drift');
+      console.error('[SECURITY] â° Timestamp too old:', timeDiff + 's drift');
       return res.status(400).json({ success: false, message: 'Request expired' });
     }
 
@@ -806,7 +806,7 @@ router.post('/sms-received', async (req, res) => {
     if (nonce) {
       const isNonceValid = await checkAndStoreNonce(nonce, deviceId);
       if (!isNonceValid) {
-        console.error('[SECURITY] 🔄 Replay attack! Nonce reused:', nonce);
+        console.error('[SECURITY] ðŸ”„ Replay attack! Nonce reused:', nonce);
         return res.status(400).json({ success: false, message: 'Duplicate request detected' });
       }
     }
@@ -826,7 +826,7 @@ router.post('/sms-received', async (req, res) => {
       .digest('hex');
 
     if (signature !== expectedSignature) {
-      console.error('[SECURITY] ❌ Signature mismatch - forgery attempt');
+      console.error('[SECURITY] âŒ Signature mismatch - forgery attempt');
       try {
         await db.collection('security_logs').add({
           type: 'signature_mismatch', deviceId: deviceId || 'unknown',
@@ -836,7 +836,7 @@ router.post('/sms-received', async (req, res) => {
       return res.status(401).json({ success: false, message: 'Signature failed' });
     }
 
-    console.log('[VIETQR SMS] ✅ All security checks passed');
+    console.log('[VIETQR SMS] âœ… All security checks passed');
 
     // ============================================================
     // 3. Parse SMS content
@@ -850,7 +850,7 @@ router.post('/sms-received', async (req, res) => {
       });
     }
 
-    console.log('[VIETQR SMS] 📝 Parsed SMS:', {
+    console.log('[VIETQR SMS] ðŸ“ Parsed SMS:', {
       amount: parsedSms.amount,
       account: parsedSms.account,
       memo: parsedSms.memo
@@ -862,7 +862,7 @@ router.post('/sms-received', async (req, res) => {
     //    could be swapped by an attacker.
     // ============================================================
     if (!parsedSms.memo) {
-      console.warn('[SECURITY] ⚠️ No order ID in SMS - rejecting for safety');
+      console.warn('[SECURITY] âš ï¸ No order ID in SMS - rejecting for safety');
       return res.status(400).json({
         success: false,
         message: 'No order ID (ORDxxx) found in notification. Cannot verify securely.'
@@ -875,7 +875,7 @@ router.post('/sms-received', async (req, res) => {
     let pendingOrders;
 
     // Strategy 1: Search by orderId field
-    console.log('[VIETQR SMS] 🔍 Searching by orderId:', parsedSms.memo);
+    console.log('[VIETQR SMS] ðŸ” Searching by orderId:', parsedSms.memo);
     try {
       pendingOrders = await db.collectionGroup('orders')
         .where('orderId', '==', parsedSms.memo)
@@ -883,7 +883,7 @@ router.post('/sms-received', async (req, res) => {
         .limit(1)
         .get();
     } catch (indexErr) {
-      console.warn('[VIETQR SMS] ⚠️ orderId index query failed');
+      console.warn('[VIETQR SMS] âš ï¸ orderId index query failed');
     }
 
     // Strategy 2: Search by description with VIP_ prefix
@@ -909,7 +909,7 @@ router.post('/sms-received', async (req, res) => {
     }
 
     if (!pendingOrders || pendingOrders.empty) {
-      console.warn('[VIETQR SMS] ⚠️ No pending order found for amount:', parsedSms.amount, 'memo:', parsedSms.memo);
+      console.warn('[VIETQR SMS] âš ï¸ No pending order found for amount:', parsedSms.amount, 'memo:', parsedSms.memo);
       return res.status(404).json({
         success: false,
         message: 'No matching pending order found. Please check amount and message content.'
@@ -921,7 +921,7 @@ router.post('/sms-received', async (req, res) => {
     const orderData = orderDoc.data();
     const uid = orderDoc.ref.parent.parent.id;
 
-    console.log('[VIETQR SMS] 🎯 Found matching order:', {
+    console.log('[VIETQR SMS] ðŸŽ¯ Found matching order:', {
       orderId,
       amount: orderData.amount,
       uid: uid.substring(0, 8) + '...'
@@ -945,7 +945,7 @@ router.post('/sms-received', async (req, res) => {
     // 6. Check if order already completed (avoid duplicates)
     // ============================================================
     if (orderData.status === 'completed') {
-      console.log('[VIETQR SMS] ⚠️ Order already completed (idempotent):', orderId);
+      console.log('[VIETQR SMS] âš ï¸ Order already completed (idempotent):', orderId);
       return res.json({
         success: true,
         orderId,
@@ -966,7 +966,7 @@ router.post('/sms-received', async (req, res) => {
 
     const processedSmsCodes = orderData.processedSmsCodes || [];
     if (processedSmsCodes.includes(smsCode)) {
-      console.log('[VIETQR SMS] ⚠️ SMS already processed (idempotent):', smsCode);
+      console.log('[VIETQR SMS] âš ï¸ SMS already processed (idempotent):', smsCode);
       return res.json({
         success: true,
         orderId,
@@ -981,7 +981,7 @@ router.post('/sms-received', async (req, res) => {
     // ============================================================
     // SECURITY: Check order expiration
     if (orderData.expiresAt && now > orderData.expiresAt) {
-      console.warn('[VIETQR SMS] ⏰ Order expired:', orderId);
+      console.warn('[VIETQR SMS] â° Order expired:', orderId);
       return res.status(400).json({ success: false, message: 'Order expired' });
     }
 
@@ -1001,7 +1001,7 @@ router.post('/sms-received', async (req, res) => {
       }
     });
 
-    console.log('[VIETQR SMS] ✅ Order status updated to completed');
+    console.log('[VIETQR SMS] âœ… Order status updated to completed');
 
     // ============================================================
     // 9. Credit coins to user wallet (idempotent)
@@ -1048,14 +1048,14 @@ router.post('/sms-received', async (req, res) => {
         coinsAdded = orderData.coinPackage.amount;
       });
 
-      console.log('[VIETQR SMS] 💰 Coins credited:', coinsAdded);
+      console.log('[VIETQR SMS] ðŸ’° Coins credited:', coinsAdded);
 
       // Send notification to user
       try {
         await sendNotification(
           uid,
-          '✅ Nạp xu thành công!',
-          `Bạn vừa nạp ${coinsAdded} xu từ thanh toán VietQR`
+          'âœ… Náº¡p xu thÃ nh cÃ´ng!',
+          `Báº¡n vá»«a náº¡p ${coinsAdded} xu tá»« thanh toÃ¡n VietQR`
         );
       } catch (notifError) {
         console.error('[VIETQR SMS] Notification failed:', notifError);
@@ -1066,7 +1066,7 @@ router.post('/sms-received', async (req, res) => {
     // ============================================================
     // 10. Return success response
     // ============================================================
-    console.log('[VIETQR SMS] 🎉 Payment verified successfully!');
+    console.log('[VIETQR SMS] ðŸŽ‰ Payment verified successfully!');
 
     return res.json({
       success: true,
@@ -1096,13 +1096,13 @@ function parseSmsContent(message) {
   try {
     console.log('[SMS Parse] Raw message:', message.substring(0, 200));
 
-    // 💰 Pattern 1: Amount
-    // Matches: "2,000VND", "+2.000đ", "so tien 50000d", "GD: +50,000 VND", "2000 VND", "2.000"
+    // ðŸ’° Pattern 1: Amount
+    // Matches: "2,000VND", "+2.000Ä‘", "so tien 50000d", "GD: +50,000 VND", "2000 VND", "2.000"
     let amount = 0;
     const amountPatterns = [
-      /([\d][\d\.,]{3,})\s*(?:VND|vnd|đ|d)/i,      // 2,000VND or 2000 đ
+      /([\d][\d\.,]{3,})\s*(?:VND|vnd|Ä‘|d)/i,      // 2,000VND or 2000 Ä‘
       /(?:\+|CD\s*|so\s*tien\s*|GD[:\s]*\+?)([\d][\d\.,]{3,})/i, // +2.000 or so tien 2.000
-      /([\d][\d\.,]{3,})(?:\s*[dđv]|\s*$)/i,       // 2.000d or just 2.000 at end
+      /([\d][\d\.,]{3,})(?:\s*[dÄ‘v]|\s*$)/i,       // 2.000d or just 2.000 at end
     ];
     for (const pattern of amountPatterns) {
       const match = message.match(pattern);
@@ -1112,7 +1112,7 @@ function parseSmsContent(message) {
       }
     }
 
-    // 📝 Pattern 2: Order ID / Memo
+    // ðŸ“ Pattern 2: Order ID / Memo
     // Extract just the ORDxxx part (without VIP_ or PRO_ prefix)
     let memo = null;
     const memoPatterns = [
@@ -1130,7 +1130,7 @@ function parseSmsContent(message) {
       }
     }
 
-    // 🏦 Pattern 3: Account
+    // ðŸ¦ Pattern 3: Account
     const accountMatch = message.match(/TK\s*([*\d]+)/i);
     const account = accountMatch ? accountMatch[1] : 'unknown';
 
@@ -1150,22 +1150,22 @@ function parseSmsContent(message) {
 
 /**
  * POST /vietqr/check-pending
- * Cron endpoint - Check all pending orders mỗi 30 giây
- * Gọi từ external cron service hoặc scheduled task
+ * Cron endpoint - Check all pending orders má»—i 30 giÃ¢y
+ * Gá»i tá»« external cron service hoáº·c scheduled task
  */
 router.post('/check-pending', async (req, res) => {
   try {
-    // 🛡️ Verify cron secret
+    // ðŸ›¡ï¸ Verify cron secret
     const cronSecret = process.env.CRON_SECRET;
     const authHeader = req.headers.authorization;
 
-    if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+    if (!cronSecret || authHeader !== `Bearer ${cronSecret}`) {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
 
-    console.log('[VIETQR] 🕐 Checking pending orders...');
+    console.log('[VIETQR] ðŸ• Checking pending orders...');
 
-    // 🔍 Find all pending orders (filter by time on client to avoid index)
+    // ðŸ” Find all pending orders (filter by time on client to avoid index)
     const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
     const allPendingOrders = await db.collectionGroup('orders')
       .where('status', '==', 'pending')
@@ -1192,7 +1192,7 @@ router.post('/check-pending', async (req, res) => {
         const order = doc.data();
         const uid = doc.ref.parent.parent.id;
 
-        // 🔄 Try to verify via banking API (if available)
+        // ðŸ”„ Try to verify via banking API (if available)
         // This is placeholder - integrate with actual banking API
         if (process.env.BANKING_API_ENABLED === 'true') {
           const verified = await checkPaymentStatusViaAPI(order);
@@ -1207,8 +1207,8 @@ router.post('/check-pending', async (req, res) => {
       }
     }
 
-    // ✅ CLEANUP: Delete expired orders from Firestore
-    console.log('[VIETQR] 🗑️ Cleaning up expired orders...');
+    // âœ… CLEANUP: Delete expired orders from Firestore
+    console.log('[VIETQR] ðŸ—‘ï¸ Cleaning up expired orders...');
     const now = Math.floor(Date.now() / 1000);
     const expiredOrders = await db.collectionGroup('orders')
       .where('expiresAt', '<', now)
@@ -1222,7 +1222,7 @@ router.post('/check-pending', async (req, res) => {
         if (order.status === 'pending' || order.status === 'expired') {
           await doc.ref.delete();
           cleanedUpCount++;
-          console.log('[VIETQR] 🗑️ Deleted expired order:', doc.id);
+          console.log('[VIETQR] ðŸ—‘ï¸ Deleted expired order:', doc.id);
         }
       } catch (error) {
         console.error('[VIETQR] Error deleting expired order:', error);
@@ -1286,7 +1286,7 @@ function startPollingService() {
         .get();
 
       if (pendingOrders.size > 0) {
-        console.log('[VIETQR] 🔄 Auto-polling', pendingOrders.size, 'pending orders');
+        console.log('[VIETQR] ðŸ”„ Auto-polling', pendingOrders.size, 'pending orders');
       }
 
       // Check each order (webhook may have failed)
@@ -1301,7 +1301,7 @@ function startPollingService() {
   }, 30 * 1000); // 30 seconds
 
   pollingIntervals.set('pending-orders', interval);
-  console.log('[VIETQR] ✅ Polling service started');
+  console.log('[VIETQR] âœ… Polling service started');
 }
 
 // Start polling when module loads
@@ -1311,10 +1311,17 @@ startPollingService();
  * POST /vietqr/report-issue
  * Report an issue with payment (manual report)
  */
-router.post('/report-issue', async (req, res) => {
+router.post('/report-issue', authMiddleware, async (req, res) => {
   try {
-    const uid = await verifyAuth(req);
+    const uid = req.user.uid;
     const { orderId, issueType, message, amount, description } = req.body;
+    if (orderId && !isValidOrderId(String(orderId))) {
+      return res.status(400).json({ success: false, error: 'Invalid orderId' });
+    }
+    const safeIssueType = String(issueType || 'payment_not_received').slice(0, 64);
+    const safeMessage = String(message || '').slice(0, 1000);
+    const safeDescription = String(description || '').slice(0, 200);
+    const safeAmount = Number(amount || 0);
 
     console.log('[VIETQR] Issue reported:', { uid, orderId, issueType });
 
@@ -1323,10 +1330,10 @@ router.post('/report-issue', async (req, res) => {
       id: reportRef.id,
       uid,
       orderId: orderId || 'N/A',
-      issueType: issueType || 'payment_not_received',
-      message: message || '',
-      amount: amount || 0,
-      description: description || '',
+      issueType: safeIssueType,
+      message: safeMessage,
+      amount: Number.isFinite(safeAmount) ? safeAmount : 0,
+      description: safeDescription,
       status: 'pending',
       createdAt: Timestamp.now(),
     });

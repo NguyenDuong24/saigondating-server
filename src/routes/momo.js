@@ -15,16 +15,16 @@ const db = getFirestore();
 // MoMo API Configuration
 // ==============================================================
 const MOMO_CONFIG = {
-    partnerCode: process.env.MOMO_PARTNER_CODE || 'MOMOBKUN20180529',
-    accessKey: process.env.MOMO_ACCESS_KEY || 'klm05TvNBzhg7h7j',
-    secretKey: process.env.MOMO_SECRET_KEY || 'at67qH6mk8w5Y1nAyMoYKMWACiEi2bsa',
+    partnerCode: process.env.MOMO_PARTNER_CODE,
+    accessKey: process.env.MOMO_ACCESS_KEY,
+    secretKey: process.env.MOMO_SECRET_KEY,
 
     // Sandbox URLs (đổi sang production khi go-live)
     endpoint: process.env.MOMO_ENDPOINT || 'https://test-payment.momo.vn/v2/gateway/api/create',
 
     // Callback URLs - Tạm thời dùng URL chuẩn để debug Code 99
-    redirectUrl: process.env.MOMO_REDIRECT_URL || 'https://momo.vn',
-    ipnUrl: process.env.MOMO_IPN_URL || 'https://webhook.site/b3b3b3b3-b3b3-4b3b-b3b3-b3b3b3b3b3b3',
+    redirectUrl: process.env.MOMO_REDIRECT_URL,
+    ipnUrl: process.env.MOMO_IPN_URL,
 
     requestType: 'captureWallet',
 };
@@ -32,6 +32,14 @@ const MOMO_CONFIG = {
 // ==============================================================
 // Helper Functions
 // ==============================================================
+
+function assertMomoConfig() {
+    const required = ['partnerCode', 'accessKey', 'secretKey', 'redirectUrl', 'ipnUrl'];
+    const missing = required.filter((key) => !MOMO_CONFIG[key]);
+    if (missing.length > 0) {
+        throw new Error(`MoMo configuration is missing: ${missing.join(', ')}`);
+    }
+}
 
 /**
  * Verify Firebase auth token
@@ -56,6 +64,7 @@ async function verifyAuth(req) {
  * Tạo HMAC SHA256 signature cho MoMo
  */
 function createSignature(rawData) {
+    assertMomoConfig();
     return crypto
         .createHmac('sha256', MOMO_CONFIG.secretKey)
         .update(rawData)
@@ -75,6 +84,7 @@ function verifyCallbackSignature(data, signature) {
  * Gọi MoMo API để tạo thanh toán
  */
 async function createMoMoPayment(orderInfo) {
+    assertMomoConfig();
     const {
         orderId,
         requestId,

@@ -1,5 +1,6 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const { getAuth } = require('firebase-admin/auth');
 const router = express.Router();
 
 /**
@@ -8,20 +9,22 @@ const router = express.Router();
  */
 router.get('/token', async (req, res) => {
     try {
-        // 1. Verify Authentication (User must be logged in)
-        // Note: We can use the same auth middleware logic here or extract it
+        // 1) Verify Firebase Authentication
         const authHeader = req.headers.authorization;
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
             return res.status(401).json({ success: false, error: 'No token provided' });
         }
 
-        // We trust the client to send a valid firebase token, but for VideoSDK
-        // we just need to know they are a valid user.
-        // In a real app, verify the firebase token here using admin.auth().verifyIdToken(token)
-        // For now, we'll assume the middleware or client is valid if they can hit this,
-        // but ideally we should import the auth middleware.
+        const idToken = authHeader.split('Bearer ')[1];
+        let decodedToken;
+        try {
+            decodedToken = await getAuth().verifyIdToken(idToken);
+        } catch (verifyError) {
+            console.error('[VIDEOSDK] verifyIdToken failed:', verifyError);
+            return res.status(401).json({ success: false, error: 'Invalid auth token' });
+        }
 
-        // Check for environment variables
+        // 2) Check server secrets
         const API_KEY = process.env.VIDEOSDK_API_KEY;
         const SECRET_KEY = process.env.VIDEOSDK_SECRET_KEY;
 
@@ -30,7 +33,7 @@ router.get('/token', async (req, res) => {
             return res.status(500).json({ success: false, error: 'Server configuration error' });
         }
 
-        // 2. Generate Token
+        // 3) Generate scoped token
         const options = {
             expiresIn: '120m',
             algorithm: 'HS256'
@@ -38,9 +41,10 @@ router.get('/token', async (req, res) => {
 
         const payload = {
             apikey: API_KEY,
-            permissions: ['allow_join', 'allow_mod'], // permissions
-            version: 2, // optional
-            roles: ['CRAWLER'], // optional
+            permissions: ['allow_join', 'allow_mod'],
+            version: 2,
+            roles: ['CRAWLER'],
+            uid: decodedToken.uid,
         };
 
         const token = jwt.sign(payload, SECRET_KEY, options);

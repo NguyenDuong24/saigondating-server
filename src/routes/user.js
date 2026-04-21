@@ -5,29 +5,11 @@
 
 const express = require('express');
 const { getFirestore, Timestamp } = require('firebase-admin/firestore');
-const { getAuth } = require('firebase-admin/auth');
+const authMiddleware = require('../middleware/auth');
 
 const router = express.Router();
 const db = getFirestore();
-
-/**
- * Verify Firebase auth token
- */
-async function verifyAuth(req) {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        throw { status: 401, message: 'No token provided' };
-    }
-
-    const idToken = authHeader.split('Bearer ')[1];
-    try {
-        const decodedToken = await getAuth().verifyIdToken(idToken);
-        return decodedToken.uid;
-    } catch (verifyError) {
-        console.error('[USER] verifyIdToken failed:', verifyError);
-        throw { status: 401, message: 'Invalid auth token' };
-    }
-}
+router.use(authMiddleware);
 
 /**
  * GET /api/user/pro-status
@@ -35,7 +17,7 @@ async function verifyAuth(req) {
  */
 router.get('/pro-status', async (req, res) => {
     try {
-        const uid = await verifyAuth(req);
+        const uid = req.user.uid;
         console.log('[USER] Getting pro status for:', uid);
 
         const userDoc = await db.collection('users').doc(uid).get();
@@ -87,7 +69,7 @@ router.get('/pro-status', async (req, res) => {
  */
 router.get('/message-limit', async (req, res) => {
     try {
-        const uid = await verifyAuth(req);
+        const uid = req.user.uid;
         console.log('[USER] Getting message limit for:', uid);
 
         const userDoc = await db.collection('users').doc(uid).get();
@@ -152,7 +134,7 @@ router.get('/message-limit', async (req, res) => {
  */
 router.post('/increment-message-count', async (req, res) => {
     try {
-        const uid = await verifyAuth(req);
+        const uid = req.user.uid;
 
         const userRef = db.collection('users').doc(uid);
         const today = new Date();

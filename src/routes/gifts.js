@@ -1,9 +1,16 @@
 const express = require('express');
 const { getFirestore, Timestamp, FieldValue } = require('firebase-admin/firestore');
-const { getAuth } = require('firebase-admin/auth');
+const authMiddleware = require('../middleware/auth');
+const { createIdempotencyMiddleware } = require('../middleware/idempotency');
+const {
+  validateGiftSend,
+  validateGiftRedeem,
+  validateGiftReward,
+} = require('../middleware/requestValidation');
 
 const router = express.Router();
 const db = getFirestore();
+const idempotency = createIdempotencyMiddleware();
 
 // Import gift catalog from service
 const { getGiftCatalog } = require('../utils/giftHelpers');
@@ -14,21 +21,31 @@ const { getGiftCatalog } = require('../utils/giftHelpers');
  * POST /gifts/send
  * Send a gift to another user
  */
-router.post('/send', async (req, res) => {
+router.post('/send', authMiddleware, validateGiftSend, idempotency, async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, error: 'No token provided' });
-    }
-
-    const idToken = authHeader.split('Bearer ')[1];
-    const decodedToken = await getAuth().verifyIdToken(idToken);
-    const senderUid = decodedToken.uid;
+    const senderUid = req.user.uid;
 
     const { receiverUid, roomId, giftId, senderName } = req.body;
 
     if (!receiverUid || !roomId || !giftId || !senderName) {
       return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+    if (receiverUid === senderUid) {
+      return res.status(400).json({ success: false, error: 'Cannot send gift to yourself' });
+    }
+    const safeSenderName = String(senderName).trim().slice(0, 60);
+    if (!safeSenderName) {
+      return res.status(400).json({ success: false, error: 'Invalid senderName' });
+    }
+
+    const roomRef = db.collection('rooms').doc(roomId);
+    const roomDoc = await roomRef.get();
+    if (!roomDoc.exists) {
+      return res.status(404).json({ success: false, error: 'Room not found' });
+    }
+    const participants = Array.isArray(roomDoc.data()?.participants) ? roomDoc.data().participants : [];
+    if (!participants.includes(senderUid) || !participants.includes(receiverUid)) {
+      return res.status(403).json({ success: false, error: 'Invalid room participants' });
     }
 
     // Get gift catalog
@@ -51,6 +68,7 @@ router.post('/send', async (req, res) => {
 
     // Deduct from sender
     const newBalance = currentBalance - gift.price;
+
     await db.runTransaction(async (transaction) => {
       transaction.set(walletRef, { [currencyType]: newBalance }, { merge: true });
 
@@ -71,7 +89,7 @@ router.post('/send', async (req, res) => {
       transaction.set(receiptRef, {
         id: receiptRef.id,
         fromUid: senderUid,
-        fromName: senderName,
+        fromName: safeSenderName,
         roomId,
         gift: { id: gift.id, name: gift.name, price: gift.price, icon: gift.icon, currencyType: gift.currencyType || 'coins' },
         createdAt: Timestamp.fromDate(new Date()),
@@ -83,7 +101,7 @@ router.post('/send', async (req, res) => {
       transaction.set(messageRef, {
         id: messageRef.id,
         uid: senderUid,
-        senderName,
+        senderName: safeSenderName,
         type: 'gift',
         gift: { id: gift.id, name: gift.name, price: gift.price, icon: gift.icon, currencyType: gift.currencyType || 'coins' },
         createdAt: Timestamp.fromDate(new Date()),
@@ -130,16 +148,9 @@ router.post('/send', async (req, res) => {
  * GET /gifts/received
  * Get received gifts for the authenticated user
  */
-router.get('/received', async (req, res) => {
+router.get('/received', authMiddleware, async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, error: 'No token provided' });
-    }
-
-    const idToken = authHeader.split('Bearer ')[1];
-    const decodedToken = await getAuth().verifyIdToken(idToken);
-    const uid = decodedToken.uid;
+    const uid = req.user.uid;
 
     const { limit = 50, status } = req.query;
     const limitNum = Math.min(parseInt(limit) || 50, 1000); // Max 1000
@@ -173,25 +184,24 @@ router.get('/received', async (req, res) => {
  * POST /gifts/redeem
  * Redeem a received gift for coins
  */
-router.post('/redeem', async (req, res) => {
+router.post('/redeem', authMiddleware, validateGiftRedeem, idempotency, async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, error: 'No token provided' });
-    }
-
-    const idToken = authHeader.split('Bearer ')[1];
-    const decodedToken = await getAuth().verifyIdToken(idToken);
-    const uid = decodedToken.uid;
+    const uid = req.user.uid;
 
     const { receiptId, rate = 1 } = req.body;
+    const parsedRate = Number(rate);
 
     if (!receiptId) {
       return res.status(400).json({ success: false, error: 'Missing receiptId' });
     }
+    if (!Number.isFinite(parsedRate) || parsedRate <= 0 || parsedRate > 5) {
+      return res.status(400).json({ success: false, error: 'Invalid rate' });
+    }
 
     const receiptRef = db.collection('users').doc(uid).collection('giftReceipts').doc(receiptId);
     const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
+    let redeemedValue = 0;
+    let redeemedCurrencyType = 'coins';
 
     await db.runTransaction(async (transaction) => {
       // Get receipt
@@ -209,15 +219,17 @@ router.post('/redeem', async (req, res) => {
         throw new Error('Already redeemed');
       }
 
-      const redeemValue = Math.floor(receipt.gift.price * rate);
+      const redeemValue = Math.floor(receipt.gift.price * parsedRate);
       if (isNaN(redeemValue) || redeemValue <= 0) {
         throw new Error('Invalid redeem value');
       }
+      redeemedValue = redeemValue;
 
       // Get wallet
       const walletDoc = await transaction.get(walletRef);
       const walletData = walletDoc.exists ? walletDoc.data() : {};
       const currencyType = receipt.gift.currencyType || 'coins';
+      redeemedCurrencyType = currencyType;
       const currentBalance = walletData[currencyType] || 0;
       const newBalance = currentBalance + redeemValue;
 
@@ -249,8 +261,8 @@ router.post('/redeem', async (req, res) => {
 
     res.json({
       success: true,
-      redeemValue: Math.floor(receipt.gift.price * rate),
-      newBalance: finalData[receipt.gift.currencyType || 'coins'] || 0,
+      redeemValue: redeemedValue,
+      newBalance: finalData[redeemedCurrencyType] || 0,
       coins: finalData.coins || 0,
       banhMi: finalData.banhMi || 0
     });
@@ -284,16 +296,9 @@ router.get('/catalog', async (req, res) => {
  * POST /gifts/reward
  * Watch ad to earn a free gift (rate limited to 1 per day)
  */
-router.post('/reward', async (req, res) => {
+router.post('/reward', authMiddleware, validateGiftReward, idempotency, async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, error: 'No token provided' });
-    }
-
-    const idToken = authHeader.split('Bearer ')[1];
-    const decodedToken = await getAuth().verifyIdToken(idToken);
-    const uid = decodedToken.uid;
+    const uid = req.user.uid;
 
     const { adId } = req.body;
     if (!adId) {

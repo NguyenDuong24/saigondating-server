@@ -1,9 +1,23 @@
 const express = require('express');
 const { getFirestore, Timestamp } = require('firebase-admin/firestore');
-const { getAuth } = require('firebase-admin/auth');
+const authMiddleware = require('../middleware/auth');
+const { createIdempotencyMiddleware } = require('../middleware/idempotency');
+const {
+  validateWalletTopup,
+  validateWalletSpend,
+  validateWalletReward,
+} = require('../middleware/requestValidation');
 
 const router = express.Router();
 const db = getFirestore();
+router.use(authMiddleware);
+const idempotency = createIdempotencyMiddleware();
+
+function toNumberInRange(value, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < min || n > max) return null;
+  return n;
+}
 
 // ============== WALLET ROUTES ==============
 
@@ -13,20 +27,7 @@ const db = getFirestore();
  */
 router.get('/balance', async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, error: 'No token provided' });
-    }
-
-    const idToken = authHeader.split('Bearer ')[1];
-    let decodedToken;
-    try {
-      decodedToken = await getAuth().verifyIdToken(idToken);
-    } catch (verifyError) {
-      console.error('[WALLET] verifyIdToken failed:', verifyError);
-      return res.status(401).json({ success: false, error: 'Invalid auth token' });
-    }
-    const uid = decodedToken.uid;
+    const uid = req.user.uid;
     console.log('[WALLET] Authenticated uid:', uid);
 
     // Get user wallet
@@ -57,27 +58,15 @@ router.get('/balance', async (req, res) => {
  * POST /wallet/topup
  * Add coins (Paid) to user's balance
  */
-router.post('/topup', async (req, res) => {
+router.post('/topup', validateWalletTopup, idempotency, async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, error: 'No token provided' });
-    }
-
-    const idToken = authHeader.split('Bearer ')[1];
-    let decodedToken;
-    try {
-      decodedToken = await getAuth().verifyIdToken(idToken);
-    } catch (verifyError) {
-      console.error('[WALLET] verifyIdToken failed:', verifyError);
-      return res.status(401).json({ success: false, error: 'Invalid auth token' });
-    }
-    const uid = decodedToken.uid;
+    const uid = req.user.uid;
     console.log('[WALLET] Authenticated uid:', uid);
 
     const { amount, metadata = {} } = req.body;
+    const parsedAmount = toNumberInRange(amount, 1, 1000);
 
-    if (!amount || amount < 1 || amount > 1000) {
+    if (parsedAmount === null) {
       return res.status(400).json({ success: false, error: 'Invalid amount (1-1000)' });
     }
 
@@ -92,13 +81,13 @@ router.post('/topup', async (req, res) => {
 
     // Update balance
     const walletRef = db.collection('users').doc(uid).collection('wallet').doc('balance');
-    console.log('[WALLET TOPUP] uid:', uid, 'amount:', amount);
+    console.log('[WALLET TOPUP] uid:', uid, 'amount:', parsedAmount);
     let transactionRef;
     await db.runTransaction(async (transaction) => {
       const walletDoc = await transaction.get(walletRef);
       const rawCoins = walletDoc.exists ? walletDoc.data().coins || 0 : 0;
       const currentCoins = isNaN(Number(rawCoins)) ? 0 : Number(rawCoins);
-      const newBalance = currentCoins + Number(amount);
+      const newBalance = currentCoins + parsedAmount;
 
       transaction.set(walletRef, { coins: newBalance }, { merge: true });
 
@@ -108,7 +97,7 @@ router.post('/topup', async (req, res) => {
         uid,
         type: 'topup',
         currencyType: 'coins',
-        amount,
+        amount: parsedAmount,
         balance: newBalance,
         timestamp: Timestamp.now(),
         metadata
@@ -123,7 +112,7 @@ router.post('/topup', async (req, res) => {
 
     res.json({
       success: true,
-      amount,
+      amount: parsedAmount,
       newBalance,
       banhMi,
       transactionId: `topup_${Date.now()}`
@@ -138,27 +127,15 @@ router.post('/topup', async (req, res) => {
  * POST /wallet/spend
  * Spend coins or banhMi from user's balance
  */
-router.post('/spend', async (req, res) => {
+router.post('/spend', validateWalletSpend, idempotency, async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, error: 'No token provided' });
-    }
-
-    const idToken = authHeader.split('Bearer ')[1];
-    let decodedToken;
-    try {
-      decodedToken = await getAuth().verifyIdToken(idToken);
-    } catch (verifyError) {
-      console.error('[WALLET] verifyIdToken failed:', verifyError);
-      return res.status(401).json({ success: false, error: 'Invalid auth token' });
-    }
-    const uid = decodedToken.uid;
+    const uid = req.user.uid;
     console.log('[WALLET] Authenticated uid:', uid);
 
     const { amount, currencyType = 'banhMi', metadata = {} } = req.body;
+    const parsedAmount = toNumberInRange(amount, 1, 5000);
 
-    if (!amount || amount < 1 || amount > 5000) {
+    if (parsedAmount === null) {
       return res.status(400).json({ success: false, error: 'Invalid amount (1-5000)' });
     }
 
@@ -175,11 +152,11 @@ router.post('/spend', async (req, res) => {
       const data = walletDoc.exists ? walletDoc.data() : {};
       const currentBalance = Number(data[currencyType] || 0);
 
-      if (currentBalance < Number(amount)) {
+      if (currentBalance < parsedAmount) {
         throw new Error(`Insufficient ${currencyType} balance`);
       }
 
-      newBalance = currentBalance - Number(amount);
+      newBalance = currentBalance - parsedAmount;
       transaction.set(walletRef, { [currencyType]: newBalance }, { merge: true });
 
       // Create transaction record
@@ -188,7 +165,7 @@ router.post('/spend', async (req, res) => {
         uid,
         type: 'spend',
         currencyType,
-        amount,
+        amount: parsedAmount,
         balance: newBalance,
         timestamp: Timestamp.now(),
         metadata
@@ -197,7 +174,7 @@ router.post('/spend', async (req, res) => {
 
     res.json({
       success: true,
-      amount,
+      amount: parsedAmount,
       currencyType,
       newBalance,
       transactionId: `spend_${Date.now()}`
@@ -217,23 +194,11 @@ router.post('/spend', async (req, res) => {
  */
 router.get('/transactions', async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, error: 'No token provided' });
-    }
-
-    const idToken = authHeader.split('Bearer ')[1];
-    let decodedToken;
-    try {
-      decodedToken = await getAuth().verifyIdToken(idToken);
-    } catch (verifyError) {
-      console.error('[WALLET] verifyIdToken failed:', verifyError);
-      return res.status(401).json({ success: false, error: 'Invalid auth token' });
-    }
-    const uid = decodedToken.uid;
+    const uid = req.user.uid;
     console.log('[WALLET] Authenticated uid:', uid);
 
-    const limit = parseInt(req.query.limit) || 50;
+    const requestedLimit = Number(req.query.limit);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 1), 200) : 50;
 
     const transactionsRef = db.collection('transactions')
       .where('uid', '==', uid);
@@ -267,22 +232,9 @@ router.get('/transactions', async (req, res) => {
  * POST /wallet/reward
  * Reward user with banhMi (Free) for watching an ad
  */
-router.post('/reward', async (req, res) => {
+router.post('/reward', validateWalletReward, idempotency, async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, error: 'No token provided' });
-    }
-
-    const idToken = authHeader.split('Bearer ')[1];
-    let decodedToken;
-    try {
-      decodedToken = await getAuth().verifyIdToken(idToken);
-    } catch (verifyError) {
-      console.error('[WALLET] verifyIdToken failed:', verifyError);
-      return res.status(401).json({ success: false, error: 'Invalid auth token' });
-    }
-    const uid = decodedToken.uid;
+    const uid = req.user.uid;
     console.log('[WALLET] Authenticated uid:', uid);
 
     let { amount = 10, adId, metadata = {} } = req.body;
@@ -292,6 +244,9 @@ router.post('/reward', async (req, res) => {
     amount = Number(amount);
     if (isNaN(amount) || amount <= 0) {
       return res.status(400).json({ success: false, error: 'Invalid amount' });
+    }
+    if (!adId || String(adId).length > 128) {
+      return res.status(400).json({ success: false, error: 'Invalid adId' });
     }
     if (typeof metadata !== 'object' || metadata === null) {
       try {
