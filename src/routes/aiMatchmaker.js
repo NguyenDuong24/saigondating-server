@@ -59,6 +59,12 @@ router.post('/search', async (req, res) => {
     const conversation = normalizeConversation(req.body?.messages);
     const limit = clamp(Number(req.body?.limit) || DEFAULT_MATCH_LIMIT, 1, MAX_MATCH_LIMIT);
     const location = normalizeLocation(req.body?.location);
+    const excludeIds = new Set(
+      normalizeStringArray(req.body?.excludeIds)
+        .map((id) => String(id).trim())
+        .filter(Boolean)
+        .slice(0, 50)
+    );
 
     if (prompt.length < 2) {
       return res.status(400).json({
@@ -174,7 +180,8 @@ router.post('/search', async (req, res) => {
       });
     }
 
-    const candidates = await loadCandidates(uid, viewer, analysis.intent);
+    const candidates = (await loadCandidates(uid, viewer, analysis.intent))
+      .filter((candidate) => !isExcludedCandidate(candidate, excludeIds));
     const ranked = rankCandidates(candidates, viewer, analysis.intent, searchPrompt, location)
       .slice(0, limit);
     const matches = ranked.map(({ user, percent, reasons, distanceKm }) => ({
@@ -796,6 +803,17 @@ function isDiscoverableCandidate(candidate, viewer, viewerUid) {
   return hasBasics;
 }
 
+function isExcludedCandidate(candidate, excludeIds) {
+  if (!excludeIds || !excludeIds.size) return false;
+  const candidateIds = [
+    candidate?.id,
+    candidate?.uid,
+    candidate?.userId,
+  ].map((id) => String(id || '').trim()).filter(Boolean);
+
+  return candidateIds.some((id) => excludeIds.has(id));
+}
+
 function toPublicUser(user) {
   const location = normalizeLocation(user.location);
 
@@ -934,6 +952,8 @@ function shouldRunMatchSearch(prompt, conversation) {
   const explicitSearchRegex = /\b(tim|kiem|loc|goi y|de xuat|gioi thieu|match|mai moi|ket noi|recommend|suggest|find|search|show)\b/;
   const explicitProfileRegex = /\b(ho so|nguoi hop|nguoi phu hop|gu hop|mau nguoi|doi tuong)\b/;
   const directAskRegex = /\b(giup minh|cho minh|xem thu|xem giup|tim thu|goi y thu)\b/;
+  const moreResultsRegex = /\b(them|xem them|loc tiep|goi y tiep|nguoi khac|ho so khac|ket qua moi|khac nua|nua di|them nua|more|another|next)\b/;
+  const conversationalMoreRegex = /\b(ke them|noi them|tam su them|chia se them|mo ta)\b/;
   const intent = buildHeuristicIntent(prompt);
   const signalCount = getIntentSignalCount(intent);
   const priorPreferenceCount = conversation
@@ -942,6 +962,7 @@ function shouldRunMatchSearch(prompt, conversation) {
     .length;
 
   if (explicitSearchRegex.test(text) || explicitProfileRegex.test(text)) return true;
+  if (!conversationalMoreRegex.test(text) && moreResultsRegex.test(text) && (priorPreferenceCount >= 1 || /\b(nguoi|ho so|ket qua|match|goi y)\b/.test(text))) return true;
   if (signalCount >= 3 && looksLikeSearchBrief(text)) return true;
   if (signalCount >= 2 && directAskRegex.test(text)) return true;
   if (priorPreferenceCount >= 2 && /\b(gio tim|tim di|loc di|goi y di|xem di|recommend)\b/.test(text)) return true;
