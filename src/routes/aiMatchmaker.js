@@ -87,7 +87,7 @@ router.post('/search', async (req, res) => {
 
     const viewer = { id: uid, ...viewerSnap.data() };
     const analysis = await analyzePrompt(searchPrompt, viewer);
-    const clarifyingQuestion = buildClarifyingQuestion(analysis.intent);
+    const clarifyingQuestion = buildClarifyingQuestion(analysis.intent, searchPrompt);
 
     if (clarifyingQuestion) {
       logMatchmakerRequest({
@@ -539,23 +539,25 @@ function toPublicUser(user) {
 
 function buildAssistantMessage(matches, intent, source) {
   if (!matches.length) {
-    return 'Hien chua co ho so nao khop tot. Ban thu mo ta rong hon mot chut nhe.';
+    return 'Mình chưa thấy hồ sơ nào thật sự hợp. Bạn thử nới rộng tuổi, khu vực hoặc thêm vài sở thích nhé.';
   }
 
   const topSignals = [
-    intent.genders.length ? 'gioi tinh' : '',
-    intent.interests.length ? 'so thich' : '',
-    intent.minAge || intent.maxAge ? 'do tuoi' : '',
-    intent.cities.length ? 'khu vuc' : '',
+    intent.genders.length ? 'giới tính' : '',
+    intent.interests.length ? 'sở thích' : '',
+    intent.minAge || intent.maxAge ? 'độ tuổi' : '',
+    intent.cities.length ? 'khu vực' : '',
   ].filter(Boolean);
   const signalText = topSignals.length ? ` theo ${topSignals.join(', ')}` : '';
-  const suffix = source === 'ai' ? 'AI da loc' : 'Minh da loc';
-  return `${suffix} ${matches.length} ho so phu hop${signalText} cho ban.`;
+  const suffix = source === 'ai' ? 'Mình lọc được' : 'Mình tìm được';
+  return `${suffix} ${matches.length} hồ sơ khá hợp${signalText}. Bạn xem thử vibe nào chạm nhất nhé.`;
 }
 
-function buildClarifyingQuestion(intent) {
+function buildClarifyingQuestion(intent, prompt = '') {
+  const text = normalize(prompt);
+  const flexibleGender = /(khong gioi han|mo rong|ai cung duoc|khong quan trong|tat ca)/.test(text);
   const signals = [
-    intent.genders.length > 0,
+    intent.genders.length > 0 || flexibleGender,
     Boolean(intent.minAge || intent.maxAge),
     intent.interests.length > 0,
     intent.cities.length > 0,
@@ -567,15 +569,15 @@ function buildClarifyingQuestion(intent) {
 
   if (signals >= 2) return '';
 
-  if (!intent.genders.length) {
-    return 'Bạn muốn mình tìm nam, nữ, hay không giới hạn? Nếu có khoảng tuổi hoặc khu vực mong muốn thì nói thêm cho mình nhé.';
+  if (!intent.genders.length && !flexibleGender) {
+    return 'Để mình tìm đúng gu hơn: bạn muốn gặp nam, nữ hay để mở rộng?';
   }
 
   if (!intent.minAge && !intent.maxAge) {
-    return 'Mình hiểu rồi. Bạn muốn khoảng tuổi nào, và thích người có vibe hay sở thích gì?';
+    return 'Oke, mình hiểu hướng rồi. Bạn thích khoảng tuổi nào, và vibe kiểu chill, nghiêm túc hay đi chơi trước?';
   }
 
-  return 'Bạn cho mình thêm một chút về khu vực, sở thích, hoặc kiểu mối quan hệ bạn muốn tìm nhé.';
+  return 'Bạn thêm giúp mình khu vực hoặc 1-2 sở thích nhé, mình sẽ lọc sát hơn.';
 }
 
 function normalizeConversation(value) {
