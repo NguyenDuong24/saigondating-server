@@ -56,7 +56,6 @@ router.post('/search', async (req, res) => {
     const uid = req.user.uid;
     const prompt = String(req.body?.prompt || '').trim();
     const conversation = normalizeConversation(req.body?.messages);
-    const searchPrompt = buildConversationPrompt(conversation, prompt);
     const limit = clamp(Number(req.body?.limit) || DEFAULT_MATCH_LIMIT, 1, MAX_MATCH_LIMIT);
     const location = normalizeLocation(req.body?.location);
 
@@ -86,6 +85,44 @@ router.post('/search', async (req, res) => {
     }
 
     const viewer = { id: uid, ...viewerSnap.data() };
+    const shouldSearch = shouldRunMatchSearch(prompt, conversation);
+
+    if (!shouldSearch) {
+      const source = hasAiTextProvider() ? 'ai' : 'heuristic';
+      const assistantMessage = await composeCasualAssistantMessage({
+        conversation,
+        prompt,
+        viewer,
+        fallback: buildCasualAssistantFallback(prompt, viewer),
+      });
+
+      logMatchmakerRequest({
+        uid,
+        prompt,
+        intent: {},
+        source,
+        resultCount: 0,
+        latencyMs: Date.now() - startedAt,
+        mode: 'chat',
+      }).catch((error) => {
+        console.warn('[AI_MATCHMAKER] Failed to log request:', error.message);
+      });
+
+      return res.json({
+        success: true,
+        prompt,
+        intent: {},
+        source,
+        mode: 'chat',
+        needsMoreInfo: false,
+        assistantMessage,
+        suggestedReplies: [],
+        count: 0,
+        matches: [],
+      });
+    }
+
+    const searchPrompt = buildSearchPromptFromConversation(conversation, prompt);
     const analysis = await analyzePrompt(searchPrompt, viewer);
     const clarifyingQuestion = buildClarifyingQuestion(analysis.intent, searchPrompt);
 
@@ -108,6 +145,7 @@ router.post('/search', async (req, res) => {
         source: analysis.source,
         resultCount: 0,
         latencyMs: Date.now() - startedAt,
+        mode: 'clarify',
         needsMoreInfo: true,
       }).catch((error) => {
         console.warn('[AI_MATCHMAKER] Failed to log request:', error.message);
@@ -118,6 +156,7 @@ router.post('/search', async (req, res) => {
         prompt,
         intent: analysis.intent,
         source: analysis.source,
+        mode: 'clarify',
         needsMoreInfo: true,
         assistantMessage,
         suggestedReplies,
@@ -154,6 +193,7 @@ router.post('/search', async (req, res) => {
       source: analysis.source,
       resultCount: matches.length,
       latencyMs: Date.now() - startedAt,
+      mode: 'results',
     }).catch((error) => {
       console.warn('[AI_MATCHMAKER] Failed to log request:', error.message);
     });
@@ -163,6 +203,7 @@ router.post('/search', async (req, res) => {
       prompt,
       intent: analysis.intent,
       source: analysis.source,
+      mode: 'results',
       needsMoreInfo: false,
       assistantMessage,
       suggestedReplies: [],
@@ -237,6 +278,13 @@ function getAiModelCandidates(primaryModel) {
 
 function shouldTryNextAiModel(status) {
   return [408, 429, 500, 502, 503, 504].includes(Number(status));
+}
+
+function hasAiTextProvider() {
+  return Boolean(
+    (process.env.AI_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY) &&
+    process.env.AI_CHAT_ENABLED !== 'false'
+  );
 }
 
 async function callAiIntent(prompt, viewer, apiKey) {
@@ -397,6 +445,62 @@ async function composeAiAssistantMessage({
     return cleanAssistantMessage(content, fallback);
   } catch (error) {
     console.warn('[AI_MATCHMAKER] AI chat reply failed, using fallback:', error.message);
+    return fallback;
+  }
+}
+
+async function composeCasualAssistantMessage({
+  conversation,
+  prompt,
+  viewer,
+  fallback,
+}) {
+  const apiKey = process.env.AI_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
+  if (!apiKey || process.env.AI_CHAT_ENABLED === 'false') return fallback;
+
+  try {
+    const recentMessages = normalizeConversation(conversation)
+      .slice(-8)
+      .map((item) => ({
+        role: item.role,
+        content: item.text.slice(0, 500),
+      }));
+
+    const content = await callAiText([
+      {
+        role: 'system',
+        content: [
+          'Bạn là AI Matchmaker trong app hẹn hò ChappAt.',
+          'Hãy nói chuyện bằng tiếng Việt thật tự nhiên, ấm áp, duyên, thông minh và giống người thật.',
+          'Mặc định chỉ trò chuyện bình thường, không tự chuyển sang tìm hồ sơ hay lọc match.',
+          'Chỉ khi người dùng nói rất rõ là muốn bạn tìm, gợi ý, lọc hoặc giới thiệu người phù hợp thì mới chuyển sang tìm kiếm.',
+          'Ở lượt này chỉ phản hồi như một cuộc trò chuyện thật: lắng nghe, nhớ ngữ cảnh, trả lời có cảm xúc nhẹ và gợi mở vừa đủ.',
+          'Không nhắc tới hệ thống, dữ liệu, prompt, thuật toán, JSON hay quy trình nội bộ.',
+          'Giữ câu trả lời trong 1-3 câu ngắn, dưới 70 từ, không dùng bullet.',
+        ].join(' '),
+      },
+      ...recentMessages,
+      {
+        role: 'user',
+        content: JSON.stringify({
+          latestUserMessage: prompt,
+          viewer: {
+            gender: viewer?.gender || null,
+            age: getAgeNumber(viewer?.age),
+            city: viewer?.city || viewer?.locationName || null,
+            interests: normalizeStringArray(viewer?.interests).slice(0, 8),
+          },
+          task: 'casual_conversation_only',
+        }),
+      },
+    ], apiKey, {
+      temperature: 0.9,
+      maxTokens: 160,
+    });
+
+    return cleanAssistantMessage(content, fallback);
+  } catch (error) {
+    console.warn('[AI_MATCHMAKER] Casual chat reply failed, using fallback:', error.message);
     return fallback;
   }
 }
@@ -794,16 +898,92 @@ function normalizeConversation(value) {
     .slice(-8);
 }
 
-function buildConversationPrompt(conversation, prompt) {
-  const parts = conversation
+function shouldRunMatchSearch(prompt, conversation) {
+  const text = normalize(prompt);
+  if (!text) return false;
+
+  const explicitSearchRegex = /\b(tim|kiem|loc|goi y|de xuat|gioi thieu|match|mai moi|ket noi|recommend|suggest|find|search|show)\b/;
+  const explicitProfileRegex = /\b(ho so|nguoi hop|nguoi phu hop|gu hop|mau nguoi|doi tuong)\b/;
+  const directAskRegex = /\b(giup minh|cho minh|xem thu|xem giup|tim thu|goi y thu)\b/;
+  const intent = buildHeuristicIntent(prompt);
+  const signalCount = getIntentSignalCount(intent);
+  const priorPreferenceCount = conversation
     .filter((item) => item.role === 'user')
-    .map((item) => item.text);
+    .filter((item) => shouldRememberMessageForSearch(item.text))
+    .length;
+
+  if (explicitSearchRegex.test(text) || explicitProfileRegex.test(text)) return true;
+  if (signalCount >= 3 && looksLikeSearchBrief(text)) return true;
+  if (signalCount >= 2 && directAskRegex.test(text)) return true;
+  if (priorPreferenceCount >= 2 && /\b(gio tim|tim di|loc di|goi y di|xem di|recommend)\b/.test(text)) return true;
+
+  return false;
+}
+
+function getIntentSignalCount(intent = {}) {
+  return [
+    Array.isArray(intent.genders) && intent.genders.length > 0,
+    Boolean(intent.minAge || intent.maxAge),
+    Array.isArray(intent.interests) && intent.interests.length > 0,
+    Array.isArray(intent.cities) && intent.cities.length > 0,
+    Array.isArray(intent.relationshipGoals) && intent.relationshipGoals.length > 0,
+    Array.isArray(intent.jobs) && intent.jobs.length > 0,
+    Array.isArray(intent.personality) && intent.personality.length > 0,
+    Array.isArray(intent.keywords) && intent.keywords.length >= 3,
+    Boolean(intent.radiusKm),
+  ].filter(Boolean).length;
+}
+
+function shouldRememberMessageForSearch(text) {
+  const normalizedText = normalize(text);
+  if (!normalizedText) return false;
+
+  const intent = buildHeuristicIntent(normalizedText);
+  if (getIntentSignalCount(intent) >= 1) return true;
+
+  return /\b(thich|muon|gu|nghiem tuc|chill|hai huoc|truong thanh|de thuong|tinh te|chan thanh|gan|o )\b/.test(normalizedText);
+}
+
+function looksLikeSearchBrief(text) {
+  return (
+    /[,;]/.test(text) ||
+    /^(nu|nam|khong gioi han|tim|kiem|goi y|match|find|search)\b/.test(text) ||
+    (/\b(1[8-9]|[2-5]\d)\s*(?:-|den|toi|->)\s*(1[8-9]|[2-5]\d)\b/.test(text) && /\b(cafe|coffee|hcm|saigon|ha noi|da nang|quan|q\d|km)\b/.test(text))
+  );
+}
+
+function buildSearchPromptFromConversation(conversation, prompt) {
+  const rememberedMessages = conversation
+    .filter((item) => item.role === 'user')
+    .map((item) => item.text)
+    .filter((text) => shouldRememberMessageForSearch(text));
+
+  const parts = rememberedMessages.length
+    ? rememberedMessages
+    : conversation
+      .filter((item) => item.role === 'user')
+      .map((item) => item.text);
 
   if (!parts.length || parts[parts.length - 1] !== prompt) {
     parts.push(prompt);
   }
 
   return parts.join('\n');
+}
+
+function buildCasualAssistantFallback(prompt, viewer) {
+  const text = normalize(prompt);
+  const viewerName = viewer?.username || viewer?.displayName || 'ban';
+
+  if (/\b(hi|hello|hey|chao|xin chao)\b/.test(text)) {
+    return `Chao ${viewerName}, minh o day ne. Cu noi chuyen tu nhien thoi, muon tam su hay ke gu cua ban minh deu nghe.`;
+  }
+
+  if (/\?$/.test(String(prompt).trim())) {
+    return 'Nghe cung thu vi do. Ban ke minh them chut nua xem dieu gi lam ban rung dong hoac thay de chiu nhat khi noi chuyen voi ai do?';
+  }
+
+  return 'Minh nghe ban day. Cu noi tiep that tu nhien nhe, khi nao ban muon minh tim nguoi phu hop thi chi can noi ro la duoc.';
 }
 
 async function logMatchmakerRequest(payload) {
