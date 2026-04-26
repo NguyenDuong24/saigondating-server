@@ -433,6 +433,7 @@ async function composeAiAssistantMessage({
           'Không nói mình là mô hình, không nhắc JSON, điểm số, prompt, thuật toán hay dữ liệu hệ thống.',
           'Không bịa tên, tuổi, nghề hoặc thông tin hồ sơ cụ thể nếu payload không có.',
           'Chỉ gợi ý hoặc lọc hồ sơ từ 18 tuổi trở lên; nếu người dùng yêu cầu dưới 18, nhắc ngắn gọn chọn khoảng tuổi 18+.',
+          'Không hỏi lại thông tin người dùng vừa trả lời. Nếu thiếu nhiều tiêu chí nhưng đã có ít nhất một tiêu chí, cứ tìm và nói có thể lọc sát hơn sau.',
           'Nếu cần thêm thông tin, hỏi đúng 1 câu ngắn và gợi ý vài cách trả lời.',
           'Nếu đã có kết quả, nói như đang giới thiệu nhẹ nhàng: nêu số hồ sơ, vibe khớp chính, rồi mời user xem thử.',
           'Giữ câu trả lời dưới 55 từ, có cảm giác chat thật, không dùng danh sách dài.',
@@ -499,6 +500,7 @@ async function composeCasualAssistantMessage({
           'Chỉ hỗ trợ tìm kiếm hồ sơ 18+; nếu người dùng yêu cầu dưới 18, nhắc ngắn gọn chọn khoảng tuổi 18+.',
           'Chỉ khi người dùng nói rất rõ là muốn bạn tìm, gợi ý, lọc hoặc giới thiệu người phù hợp thì mới chuyển sang tìm kiếm.',
           'Ở lượt này chỉ phản hồi như một cuộc trò chuyện thật: lắng nghe, nhớ ngữ cảnh, trả lời có cảm xúc nhẹ và gợi mở vừa đủ.',
+          'Tránh lặp lại cùng một câu hỏi. Nếu user vừa bổ sung tuổi, khu vực, giới tính hoặc vibe, hãy công nhận điều đó rồi chuyển bước tự nhiên.',
           'Không nhắc tới hệ thống, dữ liệu, prompt, thuật toán, JSON hay quy trình nội bộ.',
           'Giữ câu trả lời trong 1-3 câu ngắn, dưới 70 từ, không dùng bullet.',
         ].join(' '),
@@ -874,37 +876,11 @@ function buildClarifyingQuestion(intent, prompt = '', rawIntent = null) {
     return ADULT_ONLY_MATCHMAKER_MESSAGE;
   }
 
-  const flexibleGender = /(khong gioi han|mo rong|ai cung duoc|khong quan trong|tat ca)/.test(text);
-  const hasGender = reliableIntent.genders.length > 0 || flexibleGender;
-  const hasAge = Boolean(reliableIntent.minAge || reliableIntent.maxAge);
-  const hasLocation = reliableIntent.cities.length > 0 || Boolean(reliableIntent.radiusKm) ||
-    /\b(gan toi|gan minh|gan day|quanh day|o day|nearby|km)\b/.test(text);
-  const hasConcreteGoal = reliableIntent.relationshipGoals.some((goal) => goal !== 'dating');
-  const hasVibe = reliableIntent.interests.length > 0 ||
-    reliableIntent.jobs.length > 0 ||
-    reliableIntent.educationLevels.length > 0 ||
-    reliableIntent.personality.length > 0 ||
-    reliableIntent.dealbreakers.length > 0 ||
-    reliableIntent.keywords.length >= 3 ||
-    hasConcreteGoal;
-
-  if (!hasGender) {
-    return 'Có nha. Trước khi gợi ý hồ sơ, mình cần hiểu gu của bạn hơn: bạn muốn gặp nam, nữ hay để mở rộng?';
+  if (hasUsableSearchSignal(reliableIntent, text)) {
+    return '';
   }
 
-  if (!hasAge) {
-    return 'Oke, mình ghi nhận hướng đó rồi. Bạn thích khoảng tuổi nào? Ví dụ 18-25, 22-28 hoặc 25-32.';
-  }
-
-  if (!hasLocation) {
-    return 'Bạn muốn mình ưu tiên khu vực nào hoặc bán kính gần bạn bao nhiêu km?';
-  }
-
-  if (!hasVibe) {
-    return 'Còn vibe thì sao: bạn thích người nói chuyện nhẹ nhàng, năng động, nghiêm túc lâu dài hay có sở thích nào giống bạn?';
-  }
-
-  return '';
+  return 'Được, bạn mô tả nhanh 2-3 ý về người muốn gặp nhé: khoảng tuổi 18+, khu vực và vibe/sở thích là đủ để mình lọc.';
 }
 
 function buildSuggestedReplies(intent, prompt = '', rawIntent = null) {
@@ -914,37 +890,33 @@ function buildSuggestedReplies(intent, prompt = '', rawIntent = null) {
     return ADULT_AGE_REPLIES;
   }
 
+  if (hasUsableSearchSignal(reliableIntent, text)) {
+    return [];
+  }
+
+  return ['Nữ 22-28 ở Sài Gòn, thích cafe', '18-25 tuổi gần tôi', 'Không giới hạn, nói chuyện hợp vibe'];
+}
+
+function hasUsableSearchSignal(intent = {}, text = '') {
   const flexibleGender = /(khong gioi han|mo rong|ai cung duoc|khong quan trong|tat ca)/.test(text);
-  const hasGender = reliableIntent.genders.length > 0 || flexibleGender;
-  const hasAge = Boolean(reliableIntent.minAge || reliableIntent.maxAge);
-  const hasLocation = reliableIntent.cities.length > 0 || Boolean(reliableIntent.radiusKm) ||
-    /\b(gan toi|gan minh|gan day|quanh day|o day|nearby|km)\b/.test(text);
-  const hasConcreteGoal = reliableIntent.relationshipGoals.some((goal) => goal !== 'dating');
-  const hasVibe = reliableIntent.interests.length > 0 ||
-    reliableIntent.jobs.length > 0 ||
-    reliableIntent.educationLevels.length > 0 ||
-    reliableIntent.personality.length > 0 ||
-    reliableIntent.dealbreakers.length > 0 ||
-    reliableIntent.keywords.length >= 3 ||
-    hasConcreteGoal;
+  const nearbySignal = /\b(gan toi|gan minh|gan day|quanh day|o day|nearby|km)\b/.test(text);
 
-  if (!hasGender) {
-    return ['Không giới hạn', 'Nữ 22-28 ở Sài Gòn', 'Nam thích cafe'];
-  }
-
-  if (!hasAge) {
-    return ADULT_AGE_REPLIES;
-  }
-
-  if (!hasLocation) {
-    return ['Gần tôi 5km', 'Ở TP. HCM', 'Ở Hà Nội'];
-  }
-
-  if (!hasVibe) {
-    return ['Nói chuyện nhẹ nhàng', 'Thích cafe và phim', 'Nghiêm túc lâu dài'];
-  }
-
-  return [];
+  return Boolean(
+    (Array.isArray(intent.genders) && intent.genders.length > 0) ||
+    flexibleGender ||
+    intent.minAge ||
+    intent.maxAge ||
+    (Array.isArray(intent.interests) && intent.interests.length > 0) ||
+    (Array.isArray(intent.cities) && intent.cities.length > 0) ||
+    intent.radiusKm ||
+    nearbySignal ||
+    (Array.isArray(intent.relationshipGoals) && intent.relationshipGoals.some((goal) => goal !== 'dating')) ||
+    (Array.isArray(intent.jobs) && intent.jobs.length > 0) ||
+    (Array.isArray(intent.educationLevels) && intent.educationLevels.length > 0) ||
+    (Array.isArray(intent.personality) && intent.personality.length > 0) ||
+    (Array.isArray(intent.dealbreakers) && intent.dealbreakers.length > 0) ||
+    (Array.isArray(intent.keywords) && intent.keywords.length >= 2)
+  );
 }
 
 function getIntentSignals(intent) {
