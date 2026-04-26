@@ -14,6 +14,7 @@ const DEFAULT_MATCH_LIMIT = 6;
 const MAX_MATCH_LIMIT = 10;
 const DEFAULT_CANDIDATE_LIMIT = 180;
 const MAX_CANDIDATE_LIMIT = 500;
+const MATCHMAKER_TIMEZONE = process.env.AI_MATCHMAKER_TIMEZONE || 'Asia/Ho_Chi_Minh';
 
 const INTEREST_ALIASES = [
   { value: 'Cafe', terms: ['cafe', 'coffee', 'ca phe', 'caphe', 'tra sua'] },
@@ -85,21 +86,27 @@ router.post('/search', async (req, res) => {
     }
 
     const viewer = { id: uid, ...viewerSnap.data() };
+    const searchContextPrompt = buildSearchPromptFromConversation(conversation, prompt);
+    const chatIntent = buildHeuristicIntent(searchContextPrompt);
+    const proactiveSuggestion = buildProactiveSearchSuggestion(chatIntent, conversation, prompt);
+    const deterministicReply = resolveDeterministicCasualReply(prompt);
     const shouldSearch = shouldRunMatchSearch(prompt, conversation);
 
     if (!shouldSearch) {
-      const source = hasAiTextProvider() ? 'ai' : 'heuristic';
-      const assistantMessage = await composeCasualAssistantMessage({
+      const source = deterministicReply ? 'system' : hasAiTextProvider() ? 'ai' : 'heuristic';
+      const assistantMessage = deterministicReply || await composeCasualAssistantMessage({
         conversation,
         prompt,
         viewer,
-        fallback: buildCasualAssistantFallback(prompt, viewer),
+        intent: chatIntent,
+        proactiveSuggestion,
+        fallback: buildCasualAssistantFallback(prompt, viewer, proactiveSuggestion),
       });
 
       logMatchmakerRequest({
         uid,
         prompt,
-        intent: {},
+        intent: chatIntent,
         source,
         resultCount: 0,
         latencyMs: Date.now() - startedAt,
@@ -111,18 +118,19 @@ router.post('/search', async (req, res) => {
       return res.json({
         success: true,
         prompt,
-        intent: {},
+        intent: chatIntent,
         source,
         mode: 'chat',
         needsMoreInfo: false,
         assistantMessage,
-        suggestedReplies: [],
+        suggestedReplies: proactiveSuggestion?.suggestedReplies || [],
+        suggestedAction: proactiveSuggestion?.suggestedAction || null,
         count: 0,
         matches: [],
       });
     }
 
-    const searchPrompt = buildSearchPromptFromConversation(conversation, prompt);
+    const searchPrompt = searchContextPrompt;
     const analysis = await analyzePrompt(searchPrompt, viewer);
     const clarifyingQuestion = buildClarifyingQuestion(analysis.intent, searchPrompt);
 
@@ -160,6 +168,7 @@ router.post('/search', async (req, res) => {
         needsMoreInfo: true,
         assistantMessage,
         suggestedReplies,
+        suggestedAction: null,
         count: 0,
         matches: [],
       });
@@ -207,6 +216,7 @@ router.post('/search', async (req, res) => {
       needsMoreInfo: false,
       assistantMessage,
       suggestedReplies: [],
+      suggestedAction: null,
       count: matches.length,
       matches,
     });
@@ -453,6 +463,8 @@ async function composeCasualAssistantMessage({
   conversation,
   prompt,
   viewer,
+  intent,
+  proactiveSuggestion,
   fallback,
 }) {
   const apiKey = process.env.AI_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
@@ -479,6 +491,15 @@ async function composeCasualAssistantMessage({
           'Giữ câu trả lời trong 1-3 câu ngắn, dưới 70 từ, không dùng bullet.',
         ].join(' '),
       },
+      {
+        role: 'system',
+        content: [
+          'Tra loi uu tien do chinh xac hon su hoa my.',
+          'Neu khong chac ve kien thuc thong thuong thi noi ngan gon rang ban chua chac, dung doan.',
+          'Neu cau hoi lien quan hom nay, hom qua, ngay mai, thu trong tuan, ngay thang hoac gio, phai bam theo timeContext duoc cung cap.',
+          'Neu readiness.readyForSearch la true thi goi y mem rang ban da hieu gu va co the loc thu, nhung khong tu nhan la da di tim.',
+        ].join(' '),
+      },
       ...recentMessages,
       {
         role: 'user',
@@ -490,11 +511,19 @@ async function composeCasualAssistantMessage({
             city: viewer?.city || viewer?.locationName || null,
             interests: normalizeStringArray(viewer?.interests).slice(0, 8),
           },
+          timeContext: getCurrentTimeContext(),
+          intent,
+          readiness: proactiveSuggestion
+            ? {
+              readyForSearch: true,
+              summary: proactiveSuggestion.summary,
+            }
+            : { readyForSearch: false },
           task: 'casual_conversation_only',
         }),
       },
     ], apiKey, {
-      temperature: 0.9,
+      temperature: 0.58,
       maxTokens: 160,
     });
 
@@ -971,19 +1000,199 @@ function buildSearchPromptFromConversation(conversation, prompt) {
   return parts.join('\n');
 }
 
-function buildCasualAssistantFallback(prompt, viewer) {
+function buildCasualAssistantFallback(prompt, viewer, proactiveSuggestion) {
   const text = normalize(prompt);
   const viewerName = viewer?.username || viewer?.displayName || 'ban';
 
   if (/\b(hi|hello|hey|chao|xin chao)\b/.test(text)) {
-    return `Chao ${viewerName}, minh o day ne. Cu noi chuyen tu nhien thoi, muon tam su hay ke gu cua ban minh deu nghe.`;
+    return `Ch\u00e0o ${viewerName}, m\u00ecnh \u1edf \u0111\u00e2y n\u00e8. C\u1ee9 n\u00f3i chuy\u1ec7n t\u1ef1 nhi\u00ean th\u00f4i, mu\u1ed1n t\u00e2m s\u1ef1 hay k\u1ec3 gu c\u1ee7a b\u1ea1n m\u00ecnh \u0111\u1ec1u nghe.`;
+  }
+
+  if (proactiveSuggestion?.summary) {
+    return `M\u00ecnh hi\u1ec3u gu c\u1ee7a b\u1ea1n kh\u00e1 r\u00f5 r\u1ed3i: ${proactiveSuggestion.summary}. Khi b\u1ea1n s\u1eb5n s\u00e0ng, m\u00ecnh c\u00f3 th\u1ec3 l\u1ecdc th\u1eed v\u00e0i h\u1ed3 s\u01a1 h\u1ee3p gu n\u00e0y ngay.`;
   }
 
   if (/\?$/.test(String(prompt).trim())) {
-    return 'Nghe cung thu vi do. Ban ke minh them chut nua xem dieu gi lam ban rung dong hoac thay de chiu nhat khi noi chuyen voi ai do?';
+    return 'Nghe c\u0169ng th\u00fa v\u1ecb \u0111\u00f3. B\u1ea1n k\u1ec3 m\u00ecnh th\u00eam ch\u00fat n\u1eefa xem \u0111i\u1ec1u g\u00ec l\u00e0m b\u1ea1n rung \u0111\u1ed9ng ho\u1eb7c th\u1ea5y d\u1ec5 ch\u1ecbu nh\u1ea5t khi n\u00f3i chuy\u1ec7n v\u1edbi ai \u0111\u00f3?';
   }
 
-  return 'Minh nghe ban day. Cu noi tiep that tu nhien nhe, khi nao ban muon minh tim nguoi phu hop thi chi can noi ro la duoc.';
+  return 'M\u00ecnh nghe b\u1ea1n \u0111\u00e2y. C\u1ee9 n\u00f3i ti\u1ebfp th\u1eadt t\u1ef1 nhi\u00ean nh\u00e9, khi n\u00e0o b\u1ea1n mu\u1ed1n m\u00ecnh t\u00ecm ng\u01b0\u1eddi ph\u00f9 h\u1ee3p th\u00ec ch\u1ec9 c\u1ea7n n\u00f3i r\u00f5 l\u00e0 \u0111\u01b0\u1ee3c.';
+}
+
+function buildProactiveSearchSuggestion(intent, conversation, prompt) {
+  const signalCount = getIntentSignalCount(intent);
+  if (signalCount < 2) return null;
+
+  const combinedUserText = buildSearchPromptFromConversation(conversation, prompt);
+  const text = normalize(combinedUserText);
+  if (/\b(chua can|khoan da|tam thoi chua|cu tam su|noi chuyen thoi)\b/.test(text)) {
+    return null;
+  }
+
+  const readyForSearch = signalCount >= 3 || (signalCount >= 2 && /\b(muon|dang tim|doc than|hop gu|nghiem tuc|hen ho|gap|tim hieu|ket noi)\b/.test(text));
+  if (!readyForSearch) return null;
+
+  const summary = buildIntentSummary(intent);
+  const searchPrompt = buildSearchActionPrompt(intent);
+
+  return {
+    summary,
+    suggestedReplies: unique([
+      searchPrompt,
+      'G\u1ee3i \u00fd ng\u01b0\u1eddi h\u1ee3p v\u1edbi m\u00ecnh \u0111i',
+      '\u0110\u1ec3 m\u00ecnh k\u1ec3 th\u00eam m\u1ed9t ch\u00fat n\u1eefa',
+    ]).slice(0, 3),
+    suggestedAction: {
+      type: 'search',
+      label: summary ? `L\u1ecdc ${summary}` : 'L\u1ecdc th\u1eed h\u1ed3 s\u01a1 h\u1ee3p gu',
+      prompt: searchPrompt,
+      summary,
+    },
+  };
+}
+
+function buildSearchActionPrompt(intent = {}) {
+  const summary = buildIntentSummary(intent);
+  if (!summary) return 'L\u1ecdc gi\u00fap m\u00ecnh v\u00e0i h\u1ed3 s\u01a1 h\u1ee3p gu nh\u00e9.';
+  return `L\u1ecdc gi\u00fap m\u00ecnh v\u00e0i h\u1ed3 s\u01a1 ${summary} nh\u00e9.`;
+}
+
+function buildIntentSummary(intent = {}) {
+  const parts = [];
+
+  if (Array.isArray(intent.genders) && intent.genders.length === 1) {
+    parts.push(intent.genders[0] === 'female' ? 'n\u1eef' : 'nam');
+  }
+
+  if (intent.minAge && intent.maxAge) {
+    parts.push(`${intent.minAge}-${intent.maxAge} tu\u1ed5i`);
+  } else if (intent.minAge) {
+    parts.push(`t\u1eeb ${intent.minAge} tu\u1ed5i`);
+  } else if (intent.maxAge) {
+    parts.push(`d\u01b0\u1edbi ${intent.maxAge} tu\u1ed5i`);
+  }
+
+  if (Array.isArray(intent.cities) && intent.cities.length) {
+    parts.push(`\u1edf ${intent.cities[0]}`);
+  }
+
+  if (Array.isArray(intent.interests) && intent.interests.length) {
+    parts.push(`th\u00edch ${intent.interests.slice(0, 2).join(' v\u00e0 ')}`);
+  }
+
+  if (Array.isArray(intent.relationshipGoals) && intent.relationshipGoals.length) {
+    if (intent.relationshipGoals.includes('serious')) {
+      parts.push('\u01b0u ti\u00ean nghi\u00eam t\u00fac');
+    } else if (intent.relationshipGoals.includes('dating')) {
+      parts.push('\u0111\u1ec3 t\u00ecm hi\u1ec3u');
+    }
+  }
+
+  return parts.join(' ').trim();
+}
+
+function resolveDeterministicCasualReply(prompt) {
+  const text = normalize(prompt);
+  if (!text) return '';
+
+  const timeContext = getCurrentTimeContext();
+  const relativeKey = getRelativeDayKey(text);
+  const claimedWeekday = extractClaimedWeekday(text);
+  const targetDay = relativeKey ? timeContext[relativeKey] : null;
+
+  if (targetDay && claimedWeekday) {
+    const isCorrect = normalize(claimedWeekday) === normalize(targetDay.weekday);
+    const relativeLabel = relativeKey === 'tomorrow'
+      ? 'ng\u00e0y mai'
+      : relativeKey === 'yesterday'
+        ? 'h\u00f4m qua'
+        : 'h\u00f4m nay';
+
+    return isCorrect
+      ? `\u0110\u00fang r\u1ed3i, ${relativeLabel} l\u00e0 ${targetDay.weekday}, ng\u00e0y ${targetDay.date}.`
+      : `M\u00ecnh ki\u1ec3m tra l\u1ea1i nh\u00e9: ${relativeLabel} l\u00e0 ${targetDay.weekday}, ng\u00e0y ${targetDay.date}.`;
+  }
+
+  if (/\b(bay gio|gio nay|luc nay).*(may gio|bao nhieu gio)|\bmay gio roi\b|\bbao nhieu gio roi\b/.test(text)) {
+    return `B\u00e2y gi\u1edd l\u00e0 ${timeContext.now.time} theo gi\u1edd Vi\u1ec7t Nam. H\u00f4m nay l\u00e0 ${timeContext.today.weekday}, ng\u00e0y ${timeContext.today.date}.`;
+  }
+
+  if (/\b(hom nay|hnay).*(thu may|thu gi|ngay bao nhieu)|\bthu may.*(hom nay|hnay)\b/.test(text)) {
+    return `H\u00f4m nay l\u00e0 ${timeContext.today.weekday}, ng\u00e0y ${timeContext.today.date}.`;
+  }
+
+  if (/\b(ngay mai|mai).*(thu may|thu gi|ngay bao nhieu)|\bthu may.*(ngay mai|mai)\b/.test(text)) {
+    return `Ng\u00e0y mai l\u00e0 ${timeContext.tomorrow.weekday}, ng\u00e0y ${timeContext.tomorrow.date}.`;
+  }
+
+  if (/\b(hom qua).*(thu may|thu gi|ngay bao nhieu)|\bthu may.*hom qua\b/.test(text)) {
+    return `H\u00f4m qua l\u00e0 ${timeContext.yesterday.weekday}, ng\u00e0y ${timeContext.yesterday.date}.`;
+  }
+
+  return '';
+}
+
+function getRelativeDayKey(text) {
+  if (/\bhom qua\b/.test(text)) return 'yesterday';
+  if (/\bngay mai\b|\bmai\b/.test(text)) return 'tomorrow';
+  if (/\bhom nay\b|\bhnay\b/.test(text)) return 'today';
+  return '';
+}
+
+function extractClaimedWeekday(text) {
+  const weekdayMap = [
+    { pattern: /\bchu nhat\b/, label: 'Ch\u1ee7 nh\u1eadt' },
+    { pattern: /\bthu\s*(2|hai)\b/, label: 'Th\u1ee9 Hai' },
+    { pattern: /\bthu\s*(3|ba)\b/, label: 'Th\u1ee9 Ba' },
+    { pattern: /\bthu\s*(4|tu)\b/, label: 'Th\u1ee9 T\u01b0' },
+    { pattern: /\bthu\s*(5|nam)\b/, label: 'Th\u1ee9 N\u0103m' },
+    { pattern: /\bthu\s*(6|sau)\b/, label: 'Th\u1ee9 S\u00e1u' },
+    { pattern: /\bthu\s*(7|bay)\b/, label: 'Th\u1ee9 B\u1ea3y' },
+  ];
+
+  const match = weekdayMap.find((item) => item.pattern.test(text));
+  return match?.label || '';
+}
+
+function getCurrentTimeContext() {
+  const now = new Date();
+
+  return {
+    timezone: MATCHMAKER_TIMEZONE,
+    now: buildDateSnapshot(now),
+    today: buildDateSnapshot(now),
+    tomorrow: buildDateSnapshot(new Date(now.getTime() + 24 * 60 * 60 * 1000)),
+    yesterday: buildDateSnapshot(new Date(now.getTime() - 24 * 60 * 60 * 1000)),
+  };
+}
+
+function buildDateSnapshot(value) {
+  return {
+    date: new Intl.DateTimeFormat('vi-VN', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      timeZone: MATCHMAKER_TIMEZONE,
+    }).format(value),
+    weekday: capitalizeLabel(
+      new Intl.DateTimeFormat('vi-VN', {
+        weekday: 'long',
+        timeZone: MATCHMAKER_TIMEZONE,
+      }).format(value)
+    ),
+    time: new Intl.DateTimeFormat('vi-VN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: MATCHMAKER_TIMEZONE,
+    }).format(value),
+  };
+}
+
+function capitalizeLabel(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 async function logMatchmakerRequest(payload) {
