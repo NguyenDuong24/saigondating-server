@@ -616,7 +616,7 @@ function normalizeIntent(raw = {}) {
   return {
     genders: unique(genders),
     minAge: minAge && minAge >= 18 ? minAge : null,
-    maxAge: maxAge && maxAge >= 18 ? maxAge : null,
+    maxAge: maxAge && maxAge > 18 ? maxAge : null,
     interests: unique(normalizeStringArray(raw.interests)).slice(0, 12),
     jobs: unique(normalizeStringArray(raw.jobs)).slice(0, 8),
     educationLevels: unique(normalizeStringArray(raw.educationLevels)).slice(0, 8),
@@ -798,6 +798,9 @@ function isDiscoverableCandidate(candidate, viewer, viewerUid) {
   if (isUidIncluded(viewer?.blockedUsers, candidateUid) || isUidIncluded(viewer?.blockedUserIds, candidateUid)) return false;
   if (isUidIncluded(candidate?.blockedUsers, viewerUid) || isUidIncluded(candidate?.blockedUserIds, viewerUid)) return false;
 
+  const candidateAge = getAgeNumber(candidate.age);
+  if (!candidateAge || candidateAge < 18) return false;
+
   const hasBasics = candidate.profileCompleted === true ||
     Boolean(candidate.username && candidate.gender && candidate.age != null && (candidate.profileUrl || candidate.photoURL || candidate.avatarUrl));
 
@@ -863,6 +866,10 @@ function buildAssistantMessage(matches, intent, source) {
 function buildClarifyingQuestion(intent, prompt = '', rawIntent = null) {
   const reliableIntent = rawIntent || intent;
   const text = normalize(prompt);
+  if (hasUnderageDatingRequest(text)) {
+    return 'Mình chỉ hỗ trợ gợi ý người từ 18 tuổi trở lên. Bạn chọn lại khoảng tuổi 18+ giúp mình nhé.';
+  }
+
   const flexibleGender = /(khong gioi han|mo rong|ai cung duoc|khong quan trong|tat ca)/.test(text);
   const hasGender = reliableIntent.genders.length > 0 || flexibleGender;
   const hasAge = Boolean(reliableIntent.minAge || reliableIntent.maxAge);
@@ -899,6 +906,10 @@ function buildClarifyingQuestion(intent, prompt = '', rawIntent = null) {
 function buildSuggestedReplies(intent, prompt = '', rawIntent = null) {
   const reliableIntent = rawIntent || intent;
   const text = normalize(prompt);
+  if (hasUnderageDatingRequest(text)) {
+    return ['18-25 tuổi', '22-28 tuổi', '25-32 tuổi'];
+  }
+
   const flexibleGender = /(khong gioi han|mo rong|ai cung duoc|khong quan trong|tat ca)/.test(text);
   const hasGender = reliableIntent.genders.length > 0 || flexibleGender;
   const hasAge = Boolean(reliableIntent.minAge || reliableIntent.maxAge);
@@ -957,6 +968,9 @@ function cleanAssistantMessage(content, fallback) {
     .trim();
 
   if (!message) return fallback;
+  if (/\b(xin loi|sorry)\b.*\b(khong the|khong giup|can't|cannot)\b/i.test(normalize(message))) {
+    return fallback;
+  }
   return message.length > 420 ? `${message.slice(0, 417).trim()}...` : message;
 }
 
@@ -975,6 +989,7 @@ function normalizeConversation(value) {
 function shouldRunMatchSearch(prompt, conversation) {
   const text = normalize(prompt);
   if (!text) return false;
+  if (hasUnderageDatingRequest(text)) return false;
 
   const explicitSearchRegex = /\b(tim|kiem|loc|goi y|de xuat|gioi thieu|match|mai moi|ket noi|recommend|suggest|find|search|show)\b/;
   const explicitProfileRegex = /\b(ho so|nguoi hop|nguoi phu hop|gu hop|mau nguoi|doi tuong)\b/;
@@ -1067,6 +1082,10 @@ function buildCasualAssistantFallback(prompt, viewer, proactiveSuggestion) {
   const text = normalize(prompt);
   const viewerName = viewer?.username || viewer?.displayName || 'ban';
 
+  if (/\b(di dao|di choi|hen toi nay|gap toi nay|di voi toi|di voi tui)\b/.test(text)) {
+    return 'Nghe khá dễ thương đó. Trước khi mình gợi ý ai đi cùng, bạn cho mình biết khoảng tuổi, khu vực và vibe bạn thấy thoải mái nhé. Mình chỉ gợi ý người từ 18 tuổi trở lên.';
+  }
+
   if (/\b(hi|hello|hey|chao|xin chao)\b/.test(text)) {
     return `Ch\u00e0o ${viewerName}, m\u00ecnh \u1edf \u0111\u00e2y n\u00e8. C\u1ee9 n\u00f3i chuy\u1ec7n t\u1ef1 nhi\u00ean th\u00f4i, mu\u1ed1n t\u00e2m s\u1ef1 hay k\u1ec3 gu c\u1ee7a b\u1ea1n m\u00ecnh \u0111\u1ec1u nghe.`;
   }
@@ -1085,6 +1104,7 @@ function buildCasualAssistantFallback(prompt, viewer, proactiveSuggestion) {
 function buildProactiveSearchSuggestion(intent, conversation, prompt) {
   const signalCount = getIntentSignalCount(intent);
   if (signalCount < 2) return null;
+  if (hasUnsafeAgeIntent(intent)) return null;
 
   const combinedUserText = buildSearchPromptFromConversation(conversation, prompt);
   const text = normalize(combinedUserText);
@@ -1120,6 +1140,17 @@ function buildSearchActionPrompt(intent = {}) {
   return `L\u1ecdc gi\u00fap m\u00ecnh v\u00e0i h\u1ed3 s\u01a1 ${summary} nh\u00e9.`;
 }
 
+function hasUnsafeAgeIntent(intent = {}) {
+  const minAge = toNullableNumber(intent.minAge);
+  const maxAge = toNullableNumber(intent.maxAge);
+  return Boolean((minAge && minAge < 18) || (maxAge && maxAge <= 18 && !minAge));
+}
+
+function hasUnderageDatingRequest(text = '') {
+  return /\b(?:duoi|nho hon|under)\s*(1[0-7]|18)\b/.test(text) ||
+    /\b(1[0-7])\s*(?:tuoi)?\b/.test(text);
+}
+
 function buildIntentSummary(intent = {}) {
   const parts = [];
 
@@ -1131,7 +1162,7 @@ function buildIntentSummary(intent = {}) {
     parts.push(`${intent.minAge}-${intent.maxAge} tu\u1ed5i`);
   } else if (intent.minAge) {
     parts.push(`t\u1eeb ${intent.minAge} tu\u1ed5i`);
-  } else if (intent.maxAge) {
+  } else if (intent.maxAge && intent.maxAge > 18) {
     parts.push(`d\u01b0\u1edbi ${intent.maxAge} tu\u1ed5i`);
   }
 
