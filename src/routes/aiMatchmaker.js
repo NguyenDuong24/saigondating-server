@@ -47,6 +47,8 @@ const STOPWORDS = new Set([
   'de', 'di', 'cho', 'co', 'la', 'o', 'gan', 'thich', 'hop', 'vui', 'nay',
   'hom', 'nay', 'can', 'gap', 'neu', 'nhung', 'cac', 'va', 'hoac', 'the',
 ]);
+const ADULT_ONLY_MATCHMAKER_MESSAGE = 'Để an toàn, ChappAt chỉ gợi ý hồ sơ từ 18 tuổi trở lên. Bạn chọn một khoảng tuổi 18+ nhé.';
+const ADULT_AGE_REPLIES = ['18-25 tuổi', '22-28 tuổi', '25-32 tuổi'];
 
 router.use(authMiddleware);
 
@@ -95,7 +97,7 @@ router.post('/search', async (req, res) => {
     const searchContextPrompt = buildSearchPromptFromConversation(conversation, prompt);
     const chatIntent = buildHeuristicIntent(searchContextPrompt);
     const proactiveSuggestion = buildProactiveSearchSuggestion(chatIntent, conversation, prompt);
-    const deterministicReply = resolveDeterministicCasualReply(prompt);
+    const deterministicReply = resolveSafetyReply(prompt) || resolveDeterministicCasualReply(prompt);
     const shouldSearch = shouldRunMatchSearch(prompt, conversation);
 
     if (!shouldSearch) {
@@ -430,6 +432,7 @@ async function composeAiAssistantMessage({
           'Trò chuyện bằng tiếng Việt tự nhiên, thân thiện, thông minh, giống một người tư vấn gu hẹn hò tinh tế.',
           'Không nói mình là mô hình, không nhắc JSON, điểm số, prompt, thuật toán hay dữ liệu hệ thống.',
           'Không bịa tên, tuổi, nghề hoặc thông tin hồ sơ cụ thể nếu payload không có.',
+          'Chỉ gợi ý hoặc lọc hồ sơ từ 18 tuổi trở lên; nếu người dùng yêu cầu dưới 18, nhắc ngắn gọn chọn khoảng tuổi 18+.',
           'Nếu cần thêm thông tin, hỏi đúng 1 câu ngắn và gợi ý vài cách trả lời.',
           'Nếu đã có kết quả, nói như đang giới thiệu nhẹ nhàng: nêu số hồ sơ, vibe khớp chính, rồi mời user xem thử.',
           'Giữ câu trả lời dưới 55 từ, có cảm giác chat thật, không dùng danh sách dài.',
@@ -493,6 +496,7 @@ async function composeCasualAssistantMessage({
           'Bạn là AI Matchmaker trong app hẹn hò ChappAt.',
           'Hãy nói chuyện bằng tiếng Việt thật tự nhiên, ấm áp, duyên, thông minh và giống người thật.',
           'Mặc định chỉ trò chuyện bình thường, không tự chuyển sang tìm hồ sơ hay lọc match.',
+          'Chỉ hỗ trợ tìm kiếm hồ sơ 18+; nếu người dùng yêu cầu dưới 18, nhắc ngắn gọn chọn khoảng tuổi 18+.',
           'Chỉ khi người dùng nói rất rõ là muốn bạn tìm, gợi ý, lọc hoặc giới thiệu người phù hợp thì mới chuyển sang tìm kiếm.',
           'Ở lượt này chỉ phản hồi như một cuộc trò chuyện thật: lắng nghe, nhớ ngữ cảnh, trả lời có cảm xúc nhẹ và gợi mở vừa đủ.',
           'Không nhắc tới hệ thống, dữ liệu, prompt, thuật toán, JSON hay quy trình nội bộ.',
@@ -867,7 +871,7 @@ function buildClarifyingQuestion(intent, prompt = '', rawIntent = null) {
   const reliableIntent = rawIntent || intent;
   const text = normalize(prompt);
   if (hasUnderageDatingRequest(text)) {
-    return 'Mình chỉ hỗ trợ gợi ý người từ 18 tuổi trở lên. Bạn chọn lại khoảng tuổi 18+ giúp mình nhé.';
+    return ADULT_ONLY_MATCHMAKER_MESSAGE;
   }
 
   const flexibleGender = /(khong gioi han|mo rong|ai cung duoc|khong quan trong|tat ca)/.test(text);
@@ -907,7 +911,7 @@ function buildSuggestedReplies(intent, prompt = '', rawIntent = null) {
   const reliableIntent = rawIntent || intent;
   const text = normalize(prompt);
   if (hasUnderageDatingRequest(text)) {
-    return ['18-25 tuổi', '22-28 tuổi', '25-32 tuổi'];
+    return ADULT_AGE_REPLIES;
   }
 
   const flexibleGender = /(khong gioi han|mo rong|ai cung duoc|khong quan trong|tat ca)/.test(text);
@@ -929,7 +933,7 @@ function buildSuggestedReplies(intent, prompt = '', rawIntent = null) {
   }
 
   if (!hasAge) {
-    return ['18-25 tuổi', '22-28 tuổi', '25-32 tuổi'];
+    return ADULT_AGE_REPLIES;
   }
 
   if (!hasLocation) {
@@ -1044,6 +1048,7 @@ function getIntentSignalCount(intent = {}) {
 function shouldRememberMessageForSearch(text) {
   const normalizedText = normalize(text);
   if (!normalizedText) return false;
+  if (hasUnderageDatingRequest(normalizedText)) return false;
 
   const intent = buildHeuristicIntent(normalizedText);
   if (getIntentSignalCount(intent) >= 1) return true;
@@ -1060,16 +1065,17 @@ function looksLikeSearchBrief(text) {
 }
 
 function buildSearchPromptFromConversation(conversation, prompt) {
-  const rememberedMessages = conversation
+  const latestIsUnderageRequest = hasUnderageDatingRequest(prompt);
+  const safeUserMessages = conversation
     .filter((item) => item.role === 'user')
     .map((item) => item.text)
+    .filter((text) => latestIsUnderageRequest || !hasUnderageDatingRequest(text));
+  const rememberedMessages = safeUserMessages
     .filter((text) => shouldRememberMessageForSearch(text));
 
   const parts = rememberedMessages.length
     ? rememberedMessages
-    : conversation
-      .filter((item) => item.role === 'user')
-      .map((item) => item.text);
+    : safeUserMessages;
 
   if (!parts.length || parts[parts.length - 1] !== prompt) {
     parts.push(prompt);
@@ -1083,7 +1089,7 @@ function buildCasualAssistantFallback(prompt, viewer, proactiveSuggestion) {
   const viewerName = viewer?.username || viewer?.displayName || 'ban';
 
   if (/\b(di dao|di choi|hen toi nay|gap toi nay|di voi toi|di voi tui)\b/.test(text)) {
-    return 'Nghe khá dễ thương đó. Trước khi mình gợi ý ai đi cùng, bạn cho mình biết khoảng tuổi, khu vực và vibe bạn thấy thoải mái nhé. Mình chỉ gợi ý người từ 18 tuổi trở lên.';
+    return 'Nghe khá dễ thương đó. Cho mình biết khoảng tuổi 18+, khu vực và vibe bạn thấy thoải mái, mình sẽ lọc nhẹ cho sát gu hơn.';
   }
 
   if (/\b(hi|hello|hey|chao|xin chao)\b/.test(text)) {
@@ -1147,8 +1153,18 @@ function hasUnsafeAgeIntent(intent = {}) {
 }
 
 function hasUnderageDatingRequest(text = '') {
-  return /\b(?:duoi|nho hon|under)\s*(1[0-7]|18)\b/.test(text) ||
-    /\b(1[0-7])\s*(?:tuoi)?\b/.test(text);
+  const normalizedText = normalize(text);
+  if (/\b(?:duoi|nho hon|under)\s*(1[0-7]|18)\b/.test(normalizedText)) return true;
+  if (/\b(1[0-7])\s*(?:-|den|toi|->)\s*(1[0-7])\b/.test(normalizedText)) return true;
+
+  const ageMatch = normalizedText.match(/\b(1[0-7])\s*(?:tuoi)?\b/);
+  if (!ageMatch) return false;
+
+  const age = Number(ageMatch[1]);
+  const prefix = normalizedText.slice(Math.max(0, ageMatch.index - 16), ageMatch.index);
+  if (age === 17 && /\b(?:tren|lon hon|over)\s*$/.test(prefix)) return false;
+
+  return true;
 }
 
 function buildIntentSummary(intent = {}) {
@@ -1183,6 +1199,10 @@ function buildIntentSummary(intent = {}) {
   }
 
   return parts.join(' ').trim();
+}
+
+function resolveSafetyReply(prompt) {
+  return hasUnderageDatingRequest(prompt) ? ADULT_ONLY_MATCHMAKER_MESSAGE : '';
 }
 
 function resolveDeterministicCasualReply(prompt) {
