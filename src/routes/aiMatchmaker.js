@@ -90,6 +90,17 @@ router.post('/search', async (req, res) => {
     const clarifyingQuestion = buildClarifyingQuestion(analysis.intent, searchPrompt);
 
     if (clarifyingQuestion) {
+      const assistantMessage = await composeAiAssistantMessage({
+        conversation,
+        prompt,
+        viewer,
+        intent: analysis.intent,
+        matches: [],
+        needsMoreInfo: true,
+        fallback: clarifyingQuestion,
+      });
+      const suggestedReplies = buildSuggestedReplies(analysis.intent, searchPrompt);
+
       logMatchmakerRequest({
         uid,
         prompt: searchPrompt,
@@ -108,7 +119,8 @@ router.post('/search', async (req, res) => {
         intent: analysis.intent,
         source: analysis.source,
         needsMoreInfo: true,
-        assistantMessage: clarifyingQuestion,
+        assistantMessage,
+        suggestedReplies,
         count: 0,
         matches: [],
       });
@@ -125,7 +137,15 @@ router.post('/search', async (req, res) => {
       distanceKm,
     }));
 
-    const assistantMessage = buildAssistantMessage(matches, analysis.intent, analysis.source);
+    const assistantMessage = await composeAiAssistantMessage({
+      conversation,
+      prompt,
+      viewer,
+      intent: analysis.intent,
+      matches,
+      needsMoreInfo: false,
+      fallback: buildAssistantMessage(matches, analysis.intent, analysis.source),
+    });
 
     logMatchmakerRequest({
       uid,
@@ -145,6 +165,7 @@ router.post('/search', async (req, res) => {
       source: analysis.source,
       needsMoreInfo: false,
       assistantMessage,
+      suggestedReplies: [],
       count: matches.length,
       matches,
     });
@@ -178,19 +199,12 @@ async function analyzePrompt(prompt, viewer) {
   }
 }
 
-async function callAiIntent(prompt, viewer, apiKey) {
-  const hasOpenRouterKey = Boolean(process.env.OPENROUTER_API_KEY);
-  const baseUrl = (process.env.AI_BASE_URL || (hasOpenRouterKey
-    ? 'https://openrouter.ai/api/v1'
-    : 'https://api.openai.com/v1')).replace(/\/$/, '');
-  const model = process.env.AI_MODEL || (hasOpenRouterKey ? 'openai/gpt-4o-mini' : 'gpt-4o-mini');
-  const timeoutMs = Number(process.env.AI_TIMEOUT_MS || 8000);
+async function postAiChatCompletion({ baseUrl, apiKey, timeoutMs, payload }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-  let response;
   try {
-    response = await fetch(`${baseUrl}/chat/completions`, {
+    return await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       signal: controller.signal,
       headers: {
@@ -201,7 +215,46 @@ async function callAiIntent(prompt, viewer, apiKey) {
           'X-Title': process.env.AI_APP_NAME || 'Saigon Dating',
         } : {}),
       },
-      body: JSON.stringify({
+      body: JSON.stringify(payload),
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function getAiModelCandidates(primaryModel) {
+  const fallbackModels = String(process.env.AI_MODEL_FALLBACKS || [
+    'openai/gpt-oss-20b:free',
+    'meta-llama/llama-3.3-70b-instruct:free',
+    'google/gemma-3-27b-it:free',
+  ].join(','))
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  return unique([primaryModel, ...fallbackModels]);
+}
+
+function shouldTryNextAiModel(status) {
+  return [408, 429, 500, 502, 503, 504].includes(Number(status));
+}
+
+async function callAiIntent(prompt, viewer, apiKey) {
+  const hasOpenRouterKey = Boolean(process.env.OPENROUTER_API_KEY);
+  const baseUrl = (process.env.AI_BASE_URL || (hasOpenRouterKey
+    ? 'https://openrouter.ai/api/v1'
+    : 'https://api.openai.com/v1')).replace(/\/$/, '');
+  const primaryModel = process.env.AI_MODEL || (hasOpenRouterKey ? 'openai/gpt-4o-mini' : 'gpt-4o-mini');
+  const models = getAiModelCandidates(primaryModel);
+  const timeoutMs = Number(process.env.AI_TIMEOUT_MS || 8000);
+  let lastError = null;
+
+  for (const model of models) {
+    const response = await postAiChatCompletion({
+      baseUrl,
+      apiKey,
+      timeoutMs,
+      payload: {
         model,
         temperature: 0.1,
         response_format: { type: 'json_object' },
@@ -228,22 +281,124 @@ async function callAiIntent(prompt, viewer, apiKey) {
             }),
           },
         ],
-      }),
+      },
     });
-  } finally {
-    clearTimeout(timeout);
-  }
 
-  if (!response.ok) {
+    if (response.ok) {
+      const data = await response.json();
+      const content = data?.choices?.[0]?.message?.content;
+      if (!content) throw new Error('AI response was empty');
+      return extractJson(content);
+    }
+
     const body = await response.text().catch(() => '');
-    throw new Error(`AI provider ${response.status}: ${body.slice(0, 160)}`);
+    lastError = new Error(`AI provider ${response.status} (${model}): ${body.slice(0, 160)}`);
+    if (!shouldTryNextAiModel(response.status)) break;
   }
 
-  const data = await response.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error('AI response was empty');
+  throw lastError || new Error('AI provider failed');
+}
 
-  return extractJson(content);
+async function callAiText(messages, apiKey, options = {}) {
+  const hasOpenRouterKey = Boolean(process.env.OPENROUTER_API_KEY);
+  const baseUrl = (process.env.AI_BASE_URL || (hasOpenRouterKey
+    ? 'https://openrouter.ai/api/v1'
+    : 'https://api.openai.com/v1')).replace(/\/$/, '');
+  const primaryModel = options.model || process.env.AI_CHAT_MODEL || process.env.AI_MODEL ||
+    (hasOpenRouterKey ? 'openai/gpt-4o-mini' : 'gpt-4o-mini');
+  const models = getAiModelCandidates(primaryModel);
+  const timeoutMs = Number(process.env.AI_CHAT_TIMEOUT_MS || process.env.AI_TIMEOUT_MS || 12000);
+  let lastError = null;
+
+  for (const model of models) {
+    const response = await postAiChatCompletion({
+      baseUrl,
+      apiKey,
+      timeoutMs,
+      payload: {
+        model,
+        messages,
+        temperature: options.temperature ?? 0.78,
+        max_tokens: options.maxTokens ?? 180,
+      },
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      return String(data?.choices?.[0]?.message?.content || '').trim();
+    }
+
+    const body = await response.text().catch(() => '');
+    lastError = new Error(`AI chat provider ${response.status} (${model}): ${body.slice(0, 160)}`);
+    if (!shouldTryNextAiModel(response.status)) break;
+  }
+
+  throw lastError || new Error('AI chat provider failed');
+}
+
+async function composeAiAssistantMessage({
+  conversation,
+  prompt,
+  viewer,
+  intent,
+  matches,
+  needsMoreInfo,
+  fallback,
+}) {
+  const apiKey = process.env.AI_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
+  if (!apiKey || process.env.AI_CHAT_ENABLED === 'false') return fallback;
+
+  try {
+    const recentMessages = normalizeConversation(conversation)
+      .slice(-6)
+      .map((item) => ({
+        role: item.role,
+        content: item.text.slice(0, 500),
+      }));
+
+    const content = await callAiText([
+      {
+        role: 'system',
+        content: [
+          'Bạn là AI Matchmaker trong app hẹn hò ChappAt.',
+          'Trò chuyện bằng tiếng Việt tự nhiên, thân thiện, thông minh, giống một người tư vấn gu hẹn hò tinh tế.',
+          'Không nói mình là mô hình, không nhắc JSON, điểm số, prompt, thuật toán hay dữ liệu hệ thống.',
+          'Không bịa tên, tuổi, nghề hoặc thông tin hồ sơ cụ thể nếu payload không có.',
+          'Nếu cần thêm thông tin, hỏi đúng 1 câu ngắn và gợi ý vài cách trả lời.',
+          'Nếu đã có kết quả, nói như đang giới thiệu nhẹ nhàng: nêu số hồ sơ, vibe khớp chính, rồi mời user xem thử.',
+          'Giữ câu trả lời dưới 55 từ, có cảm giác chat thật, không dùng danh sách dài.',
+        ].join(' '),
+      },
+      ...recentMessages,
+      {
+        role: 'user',
+        content: JSON.stringify({
+          latestUserMessage: prompt,
+          viewer: {
+            gender: viewer?.gender || null,
+            age: getAgeNumber(viewer?.age),
+            city: viewer?.city || viewer?.locationName || null,
+            interests: normalizeStringArray(viewer?.interests).slice(0, 8),
+          },
+          task: needsMoreInfo ? 'ask_one_follow_up_question' : 'respond_to_match_results',
+          intent,
+          result: {
+            count: matches.length,
+            topSignals: getIntentSignals(intent),
+            topReasons: summarizeMatchReasons(matches),
+          },
+        }),
+      },
+    ], apiKey, {
+      temperature: needsMoreInfo ? 0.82 : 0.72,
+      maxTokens: needsMoreInfo ? 120 : 170,
+    });
+
+    return cleanAssistantMessage(content, fallback);
+  } catch (error) {
+    console.warn('[AI_MATCHMAKER] AI chat reply failed, using fallback:', error.message);
+    return fallback;
+  }
 }
 
 function buildHeuristicIntent(prompt) {
@@ -578,6 +733,53 @@ function buildClarifyingQuestion(intent, prompt = '') {
   }
 
   return 'Bạn thêm giúp mình khu vực hoặc 1-2 sở thích nhé, mình sẽ lọc sát hơn.';
+}
+
+function buildSuggestedReplies(intent, prompt = '') {
+  const text = normalize(prompt);
+  const flexibleGender = /(khong gioi han|mo rong|ai cung duoc|khong quan trong|tat ca)/.test(text);
+
+  if (!intent.genders.length && !flexibleGender) {
+    return ['Không giới hạn', 'Nữ 22-28 ở Sài Gòn', 'Nam thích cafe'];
+  }
+
+  if (!intent.minAge && !intent.maxAge) {
+    return ['22-28 tuổi', '25-32 tuổi', 'Chill trước rồi tính'];
+  }
+
+  if (!intent.interests.length && !intent.relationshipGoals.length) {
+    return ['Thích cafe và phim', 'Nghiêm túc lâu dài', 'Đi chơi cuối tuần'];
+  }
+
+  return [];
+}
+
+function getIntentSignals(intent) {
+  return [
+    intent.genders.length ? `gender:${intent.genders.join(',')}` : '',
+    intent.minAge || intent.maxAge ? `age:${intent.minAge || '?'}-${intent.maxAge || '?'}` : '',
+    intent.interests.length ? `interests:${intent.interests.slice(0, 4).join(',')}` : '',
+    intent.cities.length ? `cities:${intent.cities.slice(0, 3).join(',')}` : '',
+    intent.relationshipGoals.length ? `goals:${intent.relationshipGoals.slice(0, 3).join(',')}` : '',
+  ].filter(Boolean);
+}
+
+function summarizeMatchReasons(matches) {
+  return unique(
+    matches
+      .flatMap((match) => normalizeStringArray(match.matchReasons))
+      .slice(0, 8)
+  );
+}
+
+function cleanAssistantMessage(content, fallback) {
+  const message = String(content || '')
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!message) return fallback;
+  return message.length > 420 ? `${message.slice(0, 417).trim()}...` : message;
 }
 
 function normalizeConversation(value) {
