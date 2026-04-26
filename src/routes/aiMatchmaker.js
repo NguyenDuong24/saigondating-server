@@ -137,25 +137,26 @@ router.post('/search', async (req, res) => {
     }
 
     const searchPrompt = searchContextPrompt;
+    const rawIntent = buildHeuristicIntent(searchPrompt);
     const analysis = await analyzePrompt(searchPrompt, viewer);
-    const clarifyingQuestion = buildClarifyingQuestion(analysis.intent, searchPrompt);
+    const clarifyingQuestion = buildClarifyingQuestion(analysis.intent, searchPrompt, rawIntent);
 
     if (clarifyingQuestion) {
       const assistantMessage = await composeAiAssistantMessage({
         conversation,
         prompt,
         viewer,
-        intent: analysis.intent,
+        intent: rawIntent,
         matches: [],
         needsMoreInfo: true,
         fallback: clarifyingQuestion,
       });
-      const suggestedReplies = buildSuggestedReplies(analysis.intent, searchPrompt);
+      const suggestedReplies = buildSuggestedReplies(analysis.intent, searchPrompt, rawIntent);
 
       logMatchmakerRequest({
         uid,
         prompt: searchPrompt,
-        intent: analysis.intent,
+        intent: rawIntent,
         source: analysis.source,
         resultCount: 0,
         latencyMs: Date.now() - startedAt,
@@ -168,7 +169,7 @@ router.post('/search', async (req, res) => {
       return res.json({
         success: true,
         prompt,
-        intent: analysis.intent,
+        intent: rawIntent,
         source: analysis.source,
         mode: 'clarify',
         needsMoreInfo: true,
@@ -574,7 +575,7 @@ function buildHeuristicIntent(prompt) {
     .map((entry) => entry.value);
   const relationshipGoals = [];
   if (/(nghiem tuc|lau dai|ket hon|serious|long term)/.test(text)) relationshipGoals.push('serious');
-  if (/(hen ho|dating|date)/.test(text)) relationshipGoals.push('dating');
+  if (/(hen ho|dating|date|nguoi yeu|yeu duong|lover|relationship)/.test(text)) relationshipGoals.push('dating');
   if (/(ban be|friend|tam su|chat)/.test(text)) relationshipGoals.push('friendship');
   if (/(di cafe|cafe|coffee)/.test(text)) relationshipGoals.push('coffee date');
 
@@ -859,47 +860,73 @@ function buildAssistantMessage(matches, intent, source) {
   return `${suffix} ${matches.length} hồ sơ khá hợp${signalText}. Bạn xem thử vibe nào chạm nhất nhé.`;
 }
 
-function buildClarifyingQuestion(intent, prompt = '') {
+function buildClarifyingQuestion(intent, prompt = '', rawIntent = null) {
+  const reliableIntent = rawIntent || intent;
   const text = normalize(prompt);
   const flexibleGender = /(khong gioi han|mo rong|ai cung duoc|khong quan trong|tat ca)/.test(text);
-  const signals = [
-    intent.genders.length > 0 || flexibleGender,
-    Boolean(intent.minAge || intent.maxAge),
-    intent.interests.length > 0,
-    intent.cities.length > 0,
-    intent.relationshipGoals.length > 0,
-    intent.jobs.length > 0,
-    intent.personality.length > 0,
-    intent.keywords.length >= 3,
-  ].filter(Boolean).length;
+  const hasGender = reliableIntent.genders.length > 0 || flexibleGender;
+  const hasAge = Boolean(reliableIntent.minAge || reliableIntent.maxAge);
+  const hasLocation = reliableIntent.cities.length > 0 || Boolean(reliableIntent.radiusKm) ||
+    /\b(gan toi|gan minh|gan day|quanh day|o day|nearby|km)\b/.test(text);
+  const hasConcreteGoal = reliableIntent.relationshipGoals.some((goal) => goal !== 'dating');
+  const hasVibe = reliableIntent.interests.length > 0 ||
+    reliableIntent.jobs.length > 0 ||
+    reliableIntent.educationLevels.length > 0 ||
+    reliableIntent.personality.length > 0 ||
+    reliableIntent.dealbreakers.length > 0 ||
+    reliableIntent.keywords.length >= 3 ||
+    hasConcreteGoal;
 
-  if (signals >= 2) return '';
-
-  if (!intent.genders.length && !flexibleGender) {
-    return 'Để mình tìm đúng gu hơn: bạn muốn gặp nam, nữ hay để mở rộng?';
+  if (!hasGender) {
+    return 'Có nha. Trước khi gợi ý hồ sơ, mình cần hiểu gu của bạn hơn: bạn muốn gặp nam, nữ hay để mở rộng?';
   }
 
-  if (!intent.minAge && !intent.maxAge) {
-    return 'Oke, mình hiểu hướng rồi. Bạn thích khoảng tuổi nào, và vibe kiểu chill, nghiêm túc hay đi chơi trước?';
+  if (!hasAge) {
+    return 'Oke, mình ghi nhận hướng đó rồi. Bạn thích khoảng tuổi nào? Ví dụ 18-25, 22-28 hoặc 25-32.';
   }
 
-  return 'Bạn thêm giúp mình khu vực hoặc 1-2 sở thích nhé, mình sẽ lọc sát hơn.';
+  if (!hasLocation) {
+    return 'Bạn muốn mình ưu tiên khu vực nào hoặc bán kính gần bạn bao nhiêu km?';
+  }
+
+  if (!hasVibe) {
+    return 'Còn vibe thì sao: bạn thích người nói chuyện nhẹ nhàng, năng động, nghiêm túc lâu dài hay có sở thích nào giống bạn?';
+  }
+
+  return '';
 }
 
-function buildSuggestedReplies(intent, prompt = '') {
+function buildSuggestedReplies(intent, prompt = '', rawIntent = null) {
+  const reliableIntent = rawIntent || intent;
   const text = normalize(prompt);
   const flexibleGender = /(khong gioi han|mo rong|ai cung duoc|khong quan trong|tat ca)/.test(text);
+  const hasGender = reliableIntent.genders.length > 0 || flexibleGender;
+  const hasAge = Boolean(reliableIntent.minAge || reliableIntent.maxAge);
+  const hasLocation = reliableIntent.cities.length > 0 || Boolean(reliableIntent.radiusKm) ||
+    /\b(gan toi|gan minh|gan day|quanh day|o day|nearby|km)\b/.test(text);
+  const hasConcreteGoal = reliableIntent.relationshipGoals.some((goal) => goal !== 'dating');
+  const hasVibe = reliableIntent.interests.length > 0 ||
+    reliableIntent.jobs.length > 0 ||
+    reliableIntent.educationLevels.length > 0 ||
+    reliableIntent.personality.length > 0 ||
+    reliableIntent.dealbreakers.length > 0 ||
+    reliableIntent.keywords.length >= 3 ||
+    hasConcreteGoal;
 
-  if (!intent.genders.length && !flexibleGender) {
+  if (!hasGender) {
     return ['Không giới hạn', 'Nữ 22-28 ở Sài Gòn', 'Nam thích cafe'];
   }
 
-  if (!intent.minAge && !intent.maxAge) {
-    return ['22-28 tuổi', '25-32 tuổi', 'Chill trước rồi tính'];
+  if (!hasAge) {
+    return ['18-25 tuổi', '22-28 tuổi', '25-32 tuổi'];
   }
 
-  if (!intent.interests.length && !intent.relationshipGoals.length) {
-    return ['Thích cafe và phim', 'Nghiêm túc lâu dài', 'Đi chơi cuối tuần'];
+  if (!hasLocation) {
+    return ['Gần tôi 5km', 'Ở TP. HCM', 'Ở Hà Nội'];
+  }
+
+  if (!hasVibe) {
+    return ['Nói chuyện nhẹ nhàng', 'Thích cafe và phim', 'Nghiêm túc lâu dài'];
   }
 
   return [];
@@ -966,6 +993,21 @@ function shouldRunMatchSearch(prompt, conversation) {
   if (signalCount >= 3 && looksLikeSearchBrief(text)) return true;
   if (signalCount >= 2 && directAskRegex.test(text)) return true;
   if (priorPreferenceCount >= 2 && /\b(gio tim|tim di|loc di|goi y di|xem di|recommend)\b/.test(text)) return true;
+
+  const priorSearchIntent = conversation
+    .filter((item) => item.role === 'user')
+    .some((item) => {
+      const itemText = normalize(item.text);
+      return explicitSearchRegex.test(itemText) ||
+        explicitProfileRegex.test(itemText) ||
+        /\b(nguoi yeu|hen ho|dating|ket noi)\b/.test(itemText);
+    });
+
+  if (priorSearchIntent && shouldRememberMessageForSearch(prompt)) {
+    const combinedPrompt = buildSearchPromptFromConversation(conversation, prompt);
+    const combinedIntent = buildHeuristicIntent(combinedPrompt);
+    if (!buildClarifyingQuestion(combinedIntent, combinedPrompt, combinedIntent)) return true;
+  }
 
   return false;
 }
