@@ -67,11 +67,17 @@ function getDayKey(date = new Date()) {
 
 function getVideoSdkKeys() {
     const API_KEY = process.env.VIDEOSDK_API_KEY;
-    const SECRET_KEY = process.env.VIDEOSDK_SECRET_KEY;
+    const SECRET_KEY = process.env.VIDEOSDK_SECRET_KEY || process.env.VIDEOSDK_API_SECRET || process.env.VIDEOSDK_SECRET;
 
     if (!API_KEY || !SECRET_KEY) {
-        const error = new Error('VideoSDK keys are not configured');
+        const missing = [
+            !API_KEY ? 'VIDEOSDK_API_KEY' : null,
+            !SECRET_KEY ? 'VIDEOSDK_SECRET_KEY' : null,
+        ].filter(Boolean);
+        console.error(`VideoSDK configuration missing: ${missing.join(', ')}`);
+        const error = new Error(`VideoSDK keys are not configured. Missing: ${missing.join(', ')}`);
         error.status = 500;
+        error.code = 'VIDEOSDK_KEYS_MISSING';
         throw error;
     }
 
