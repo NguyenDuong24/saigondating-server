@@ -97,8 +97,10 @@ const aiMatchmakerRoutes = require('./routes/aiMatchmaker');
 // Import middlewares
 const authMiddleware = require('./middleware/auth');
 const adminAuth = require('./middleware/adminAuth');
+const appCheckMiddleware = require('./middleware/appCheck');
 
 // Register routes
+app.use('/api', appCheckMiddleware);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/gifts', giftRoutes);
 app.use('/api/shop', shopRoutes);

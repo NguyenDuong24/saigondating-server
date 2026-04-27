@@ -82,6 +82,10 @@ function main() {
     warn('REQUIRE_IDEMPOTENCY_KEY is not true (recommended true in production)', warnings);
   }
 
+  if (String(env.REQUIRE_FIREBASE_APP_CHECK).toLowerCase() !== 'true') {
+    warn('REQUIRE_FIREBASE_APP_CHECK is not true. Enable it after the mobile app sends X-Firebase-AppCheck.', warnings);
+  }
+
   const price = Number(env.PRO_UPGRADE_PRICE);
   if (!Number.isFinite(price) || price <= 0) {
     fail('PRO_UPGRADE_PRICE must be a positive number', failures);
@@ -98,6 +102,24 @@ function main() {
     }
   } else {
     warn('VIETQR_COIN_PACKAGES not set, server will use defaults', warnings);
+  }
+
+  const boundedNumbers = [
+    ['VIDEOSDK_JOIN_TOKEN_TTL_MINUTES', 1, 60],
+    ['VIDEOSDK_ROOM_CREATE_TOKEN_TTL_MINUTES', 1, 15],
+    ['VIDEOSDK_DAILY_CALLS_FREE', 1, 100],
+    ['VIDEOSDK_DAILY_CALLS_PREMIUM', 1, 500],
+    ['VIDEOSDK_CREATE_COOLDOWN_SECONDS', 5, 3600],
+    ['VIDEOSDK_ROOM_RATE_MAX', 1, 60],
+    ['VIDEOSDK_TOKEN_RATE_MAX', 1, 500],
+  ];
+
+  for (const [key, min, max] of boundedNumbers) {
+    if (!(key in env)) continue;
+    const n = Number(env[key]);
+    if (!Number.isFinite(n) || n < min || n > max) {
+      fail(`${key} must be a number between ${min} and ${max}`, failures);
+    }
   }
 
   const firestoreRules = path.resolve(root, '..', 'firestore.rules');

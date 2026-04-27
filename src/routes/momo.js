@@ -10,6 +10,8 @@ const { getAuth } = require('firebase-admin/auth');
 
 const router = express.Router();
 const db = getFirestore();
+const DEBUG_PAYMENT_LOGS = String(process.env.DEBUG_PAYMENT_LOGS || '').toLowerCase() === 'true' &&
+    process.env.NODE_ENV !== 'production';
 
 // ==============================================================
 // MoMo API Configuration
@@ -98,7 +100,9 @@ async function createMoMoPayment(orderInfo) {
     // Tạo raw signature
     const rawSignature = `accessKey=${MOMO_CONFIG.accessKey}&amount=${amountStr}&extraData=${extraData}&ipnUrl=${MOMO_CONFIG.ipnUrl}&orderId=${orderId}&orderInfo=${orderDescription}&partnerCode=${MOMO_CONFIG.partnerCode}&redirectUrl=${MOMO_CONFIG.redirectUrl}&requestId=${requestId}&requestType=${MOMO_CONFIG.requestType}`;
 
-    console.log('🔑 [MOMO] Raw Signature:', rawSignature);
+    if (DEBUG_PAYMENT_LOGS) {
+        console.log('🔑 [MOMO] Raw Signature:', rawSignature);
+    }
     const signature = createSignature(rawSignature);
 
     const requestBody = {
@@ -117,7 +121,9 @@ async function createMoMoPayment(orderInfo) {
         signature: signature,
     };
 
-    console.log('📦 [MOMO] Full Request Body:', JSON.stringify(requestBody, null, 2));
+    if (DEBUG_PAYMENT_LOGS) {
+        console.log('📦 [MOMO] Full Request Body:', JSON.stringify(requestBody, null, 2));
+    }
 
     console.log('📤 [MOMO] Request:', {
         orderId,
@@ -160,6 +166,10 @@ async function createMoMoPayment(orderInfo) {
  */
 router.get('/test', async (req, res) => {
     try {
+        if (process.env.NODE_ENV === 'production') {
+            return res.status(404).json({ success: false, error: 'Not found' });
+        }
+
         const orderId = 'TEST' + Date.now();
         const result = await createMoMoPayment({
             orderId,
