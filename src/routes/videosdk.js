@@ -500,7 +500,8 @@ router.get('/token', tokenLimiter, async (req, res) => {
  * If receiverId is provided, also creates the Firebase call document atomically enough
  * for the mobile caller flow.
  */
-router.post('/rooms', roomCreateLimiter, idempotency, async (req, res) => {
+// temporarily disabled roomCreateLimiter and idempotency to debug 502
+router.post('/rooms', async (req, res) => {
     try {
         const uid = req.user.uid;
         const receiverId = typeof req.body?.receiverId === 'string' ? req.body.receiverId.trim() : '';
