@@ -7,6 +7,18 @@ const { createIdempotencyMiddleware } = require('../middleware/idempotency');
 const router = express.Router();
 const db = getFirestore();
 
+/**
+ * Helper to safely get milliseconds from a Firestore value (handles Timestamp, Date, or Number)
+ */
+function asSafeMillis(val) {
+    if (!val) return 0;
+    if (typeof val.toMillis === 'function') return val.toMillis();
+    if (val instanceof Date) return val.getTime();
+    if (typeof val === 'number') return val;
+    const n = Number(val);
+    return Number.isNaN(n) ? 0 : n;
+}
+
 router.use(authMiddleware);
 
 function userRateLimitKey(req) {
@@ -327,7 +339,7 @@ async function reserveDailyQuota(uid, tier, callType) {
         const usageSnap = await transaction.get(usageRef);
         const usage = usageSnap.exists ? usageSnap.data() || {} : {};
         const callsCreated = Number(usage.callsCreated || 0);
-        const cooldownUntil = usage.cooldownUntil?.toMillis?.() || 0;
+        const cooldownUntil = asSafeMillis(usage.cooldownUntil);
         const audioUsed = Number(usage.audioSecondsUsed || 0);
         const videoUsed = Number(usage.videoSecondsUsed || 0);
 
@@ -500,8 +512,13 @@ router.get('/token', tokenLimiter, async (req, res) => {
  * If receiverId is provided, also creates the Firebase call document atomically enough
  * for the mobile caller flow.
  */
-// temporarily disabled roomCreateLimiter and idempotency to debug 502
-router.post('/rooms', async (req, res) => {
+/**
+ * POST /api/videosdk/rooms
+ * IMPORTANT: reserveDailyQuota is ONLY called here. 
+ * Since ONLY the caller (the one starting the call) hits this endpoint,
+ * ONLY the caller's budget is limited/deducted. The receiver simply joins the room.
+ */
+router.post('/rooms', roomCreateLimiter, idempotency, async (req, res) => {
     try {
         const uid = req.user.uid;
         const receiverId = typeof req.body?.receiverId === 'string' ? req.body.receiverId.trim() : '';
