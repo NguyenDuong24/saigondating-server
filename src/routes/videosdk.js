@@ -113,30 +113,61 @@ async function createVideoSdkRoom(uid) {
         ttlMinutes: boundedNumberFromEnv('VIDEOSDK_ROOM_CREATE_TOKEN_TTL_MINUTES', 10, 1, 15),
     });
 
-    const response = await fetch('https://api.videosdk.live/v2/rooms', {
-        method: 'POST',
-        headers: {
-            authorization: roomToken,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({}),
-    });
+    const fetchRoom = async () => {
+        const response = await fetch('https://api.videosdk.live/v2/rooms', {
+            method: 'POST',
+            headers: {
+                authorization: roomToken,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({}),
+        });
 
-    if (!response.ok) {
-        const errorText = await response.text();
-        const error = new Error(`VideoSDK room create failed: ${response.status} ${errorText}`);
-        error.status = 502;
-        throw error;
+        if (!response.ok) {
+            const errorText = await response.text();
+            let errorJson = null;
+            try { errorJson = JSON.parse(errorText); } catch { /* ignore */ }
+
+            // Log full VideoSDK error so it appears in Render dashboard
+            console.error('[VideoSDK] Room create failed:', {
+                httpStatus: response.status,
+                body: errorJson || errorText.slice(0, 500),
+            });
+
+            const error = new Error(
+                `VideoSDK room create failed: ${response.status} ${errorJson?.message || errorText.slice(0, 120)}`
+            );
+            error.status = 502;
+            error.code = 'VIDEOSDK_UPSTREAM_ERROR';
+            error.details = {
+                videosdkStatus: response.status,
+                videosdkBody: errorJson || errorText.slice(0, 300),
+            };
+            throw error;
+        }
+
+        const data = await response.json();
+        if (!data.roomId) {
+            const error = new Error('VideoSDK did not return a roomId');
+            error.status = 502;
+            error.code = 'VIDEOSDK_NO_ROOM_ID';
+            throw error;
+        }
+        return data.roomId;
+    };
+
+    // One retry for transient errors (502/503/504)
+    try {
+        return await fetchRoom();
+    } catch (firstError) {
+        const isTransient = firstError.details?.videosdkStatus >= 500;
+        if (isTransient) {
+            console.warn('[VideoSDK] Transient error, retrying in 1s...', firstError.message);
+            await new Promise(r => setTimeout(r, 1000));
+            return await fetchRoom(); // let second error propagate naturally
+        }
+        throw firstError;
     }
-
-    const data = await response.json();
-    if (!data.roomId) {
-        const error = new Error('VideoSDK did not return a roomId');
-        error.status = 502;
-        throw error;
-    }
-
-    return data.roomId;
 }
 
 async function getUserTier(uid) {
@@ -288,7 +319,7 @@ async function reserveDailyQuota(uid, tier, callType) {
         ? numberFromEnv('VIDEOSDK_MAX_VIDEO_CALL_SECONDS_PREMIUM', 30 * 60)
         : numberFromEnv('VIDEOSDK_MAX_VIDEO_CALL_SECONDS_FREE', 5 * 60);
 
-    const cooldownSeconds = numberFromEnv('VIDEOSDK_CREATE_COOLDOWN_SECONDS', 20);
+    const cooldownSeconds = numberFromEnv('VIDEOSDK_CREATE_COOLDOWN_SECONDS', 8);
 
     let maxDurationForThisCall = 0;
 
@@ -370,6 +401,64 @@ function sanitizeMetadata(metadata) {
 }
 
 /**
+ * GET /videosdk/diag
+ * Auth-protected diagnostic: tests if VideoSDK keys are configured and can create a room.
+ * Use this to debug 502 errors from VideoSDK.
+ */
+router.get('/diag', async (req, res) => {
+    try {
+        // 1. Check keys
+        let keysOk = false;
+        let keyError = null;
+        try {
+            getVideoSdkKeys();
+            keysOk = true;
+        } catch (e) {
+            keyError = e.message;
+        }
+
+        if (!keysOk) {
+            return res.json({ ok: false, step: 'keys', error: keyError });
+        }
+
+        // 2. Try to sign a token
+        let token = null;
+        try {
+            token = signVideoSdkToken('diag-user', {
+                permissions: ['allow_join', 'allow_mod'],
+                ttlMinutes: 5,
+            });
+        } catch (e) {
+            return res.json({ ok: false, step: 'sign_token', error: e.message });
+        }
+
+        // 3. Try to create a room
+        const response = await fetch('https://api.videosdk.live/v2/rooms', {
+            method: 'POST',
+            headers: {
+                authorization: token,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({}),
+        });
+
+        const responseText = await response.text();
+        let responseJson = null;
+        try { responseJson = JSON.parse(responseText); } catch { /* ignore */ }
+
+        return res.json({
+            ok: response.ok,
+            step: 'create_room',
+            httpStatus: response.status,
+            videosdkResponse: responseJson || responseText.slice(0, 500),
+            tokenPreview: token.slice(0, 60) + '...',
+        });
+    } catch (e) {
+        res.status(500).json({ ok: false, step: 'unexpected', error: e.message });
+    }
+});
+
+/**
  * GET /videosdk/token
  * Generate a new VideoSDK token for the authenticated user
  */
@@ -436,10 +525,15 @@ router.post('/rooms', roomCreateLimiter, idempotency, async (req, res) => {
         }
 
         const tier = await getUserTier(uid);
-        // reserveDailyQuota now returns the max seconds this specific call is allowed
-        const maxDurationSeconds = await reserveDailyQuota(uid, tier, receiverId ? callType : 'room');
+
+        // ── IMPORTANT: Create the VideoSDK room FIRST, then reserve quota.
+        // If we reserve quota first and the VideoSDK API fails, the user gets
+        // stuck in a 8s cooldown for no reason.
         const roomId = await createVideoSdkRoom(uid);
         const joinToken = signVideoSdkToken(uid, { roomId });
+
+        // Now that we have a real room, deduct from the daily budget
+        const maxDurationSeconds = await reserveDailyQuota(uid, tier, receiverId ? callType : 'room');
 
         await rememberVideoRoom(roomId, uid, receiverId, tier, maxDurationSeconds, metadata);
 
@@ -481,7 +575,13 @@ router.post('/rooms', roomCreateLimiter, idempotency, async (req, res) => {
         });
 
     } catch (error) {
-        console.error('VideoSDK room error:', error);
+        console.error('VideoSDK room error:', {
+            message: error.message,
+            code: error.code,
+            status: error.status,
+            details: error.details,
+            stack: error.stack?.split('\n').slice(0, 4).join(' | '),
+        });
         res.status(error.status || 500).json({
             success: false,
             code: error.code || 'VIDEOSDK_ROOM_FAILED',
