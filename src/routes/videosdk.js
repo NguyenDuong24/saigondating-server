@@ -250,48 +250,111 @@ async function assertCanJoinRoom(uid, roomId) {
     throw error;
 }
 
+/**
+ * Reserve daily quota for a call.
+ * Tracks:
+ *   - callsCreated          (total calls today)
+ *   - audioSecondsUsed      (cumulative audio seconds budget consumed)
+ *   - videoSecondsUsed      (cumulative video seconds budget consumed)
+ *   - cooldownUntil          (anti-spam cooldown)
+ *
+ * Returns the max allowed seconds for THIS call.
+ */
 async function reserveDailyQuota(uid, tier, callType) {
     const dayKey = getDayKey();
     const usageRef = db.collection('call_usage').doc(`${uid}_${dayKey}`);
     const now = Timestamp.now();
-    const dailyLimit = tier === 'premium'
+
+    // ── Limits based on tier ────────────────────────────────────
+    const isPremium = tier === 'premium';
+
+    const dailyCallCount = isPremium
         ? numberFromEnv('VIDEOSDK_DAILY_CALLS_PREMIUM', 120)
         : numberFromEnv('VIDEOSDK_DAILY_CALLS_FREE', 20);
+
+    const dailyAudioBudget = isPremium
+        ? numberFromEnv('VIDEOSDK_DAILY_AUDIO_SECONDS_PREMIUM', 120 * 60)
+        : numberFromEnv('VIDEOSDK_DAILY_AUDIO_SECONDS_FREE', 20 * 60);
+
+    const dailyVideoBudget = isPremium
+        ? numberFromEnv('VIDEOSDK_DAILY_VIDEO_SECONDS_PREMIUM', 60 * 60)
+        : numberFromEnv('VIDEOSDK_DAILY_VIDEO_SECONDS_FREE', 5 * 60);
+
+    const maxPerCallAudio = isPremium
+        ? numberFromEnv('VIDEOSDK_MAX_AUDIO_CALL_SECONDS_PREMIUM', 60 * 60)
+        : numberFromEnv('VIDEOSDK_MAX_AUDIO_CALL_SECONDS_FREE', 20 * 60);
+
+    const maxPerCallVideo = isPremium
+        ? numberFromEnv('VIDEOSDK_MAX_VIDEO_CALL_SECONDS_PREMIUM', 30 * 60)
+        : numberFromEnv('VIDEOSDK_MAX_VIDEO_CALL_SECONDS_FREE', 5 * 60);
+
     const cooldownSeconds = numberFromEnv('VIDEOSDK_CREATE_COOLDOWN_SECONDS', 20);
+
+    let maxDurationForThisCall = 0;
 
     await db.runTransaction(async (transaction) => {
         const usageSnap = await transaction.get(usageRef);
         const usage = usageSnap.exists ? usageSnap.data() || {} : {};
         const callsCreated = Number(usage.callsCreated || 0);
         const cooldownUntil = usage.cooldownUntil?.toMillis?.() || 0;
+        const audioUsed = Number(usage.audioSecondsUsed || 0);
+        const videoUsed = Number(usage.videoSecondsUsed || 0);
 
-        if (callsCreated >= dailyLimit) {
-            const error = new Error('Daily call limit reached');
+        // ── Anti-spam: call count ────────────────────────────────
+        if (callsCreated >= dailyCallCount) {
+            const error = new Error('Bạn đã đạt giới hạn cuộc gọi trong ngày');
             error.status = 429;
             error.code = 'DAILY_CALL_LIMIT';
-            error.details = { current: callsCreated, max: dailyLimit };
+            error.details = { current: callsCreated, max: dailyCallCount };
             throw error;
         }
 
+        // ── Anti-spam: cooldown ──────────────────────────────────
         if (cooldownUntil > Date.now()) {
-            const error = new Error('Please wait before creating another call');
+            const error = new Error('Vui lòng chờ trước khi tạo cuộc gọi mới');
             error.status = 429;
             error.code = 'CALL_COOLDOWN';
             error.details = { retryAfterMs: cooldownUntil - Date.now() };
             throw error;
         }
 
+        // ── Daily budget check for the specific call type ───────
+        const isVideo = callType === 'video';
+        const usedSeconds = isVideo ? videoUsed : audioUsed;
+        const dailyBudget = isVideo ? dailyVideoBudget : dailyAudioBudget;
+        const maxPerCall = isVideo ? maxPerCallVideo : maxPerCallAudio;
+
+        const remainingBudget = Math.max(0, dailyBudget - usedSeconds);
+        if (remainingBudget <= 0) {
+            const typeLabel = isVideo ? 'video' : 'thoại';
+            const error = new Error(`Bạn đã hết thời lượng cuộc gọi ${typeLabel} miễn phí hôm nay`);
+            error.status = 429;
+            error.code = isVideo ? 'DAILY_VIDEO_LIMIT' : 'DAILY_AUDIO_LIMIT';
+            error.details = { usedSeconds, dailyBudget, callType };
+            throw error;
+        }
+
+        // The call gets the lesser of: per-call max OR remaining daily budget
+        maxDurationForThisCall = Math.min(maxPerCall, remainingBudget);
+
+        // Reserve the full max duration optimistically.
+        // (A post-call webhook or client report can refund unused seconds later if needed.)
+        const budgetField = isVideo ? 'videoSecondsUsed' : 'audioSecondsUsed';
+
         transaction.set(usageRef, {
             uid,
             dayKey,
             tier,
             callsCreated: FieldValue.increment(1),
-            [`${callType || 'room'}RoomsCreated`]: FieldValue.increment(1),
+            [budgetField]: FieldValue.increment(maxDurationForThisCall),
+            [`${callType}CallsCreated`]: FieldValue.increment(1),
             cooldownUntil: Timestamp.fromMillis(Date.now() + cooldownSeconds * 1000),
             updatedAt: now,
             createdAt: usage.createdAt || now,
         }, { merge: true });
     });
+
+    return maxDurationForThisCall;
 }
 
 function sanitizeMetadata(metadata) {
@@ -373,12 +436,10 @@ router.post('/rooms', roomCreateLimiter, idempotency, async (req, res) => {
         }
 
         const tier = await getUserTier(uid);
-        await reserveDailyQuota(uid, tier, receiverId ? callType : 'room');
+        // reserveDailyQuota now returns the max seconds this specific call is allowed
+        const maxDurationSeconds = await reserveDailyQuota(uid, tier, receiverId ? callType : 'room');
         const roomId = await createVideoSdkRoom(uid);
         const joinToken = signVideoSdkToken(uid, { roomId });
-        const maxDurationSeconds = tier === 'premium'
-            ? numberFromEnv('VIDEOSDK_MAX_DURATION_SECONDS_PREMIUM', 45 * 60)
-            : numberFromEnv('VIDEOSDK_MAX_DURATION_SECONDS_FREE', 10 * 60);
 
         await rememberVideoRoom(roomId, uid, receiverId, tier, maxDurationSeconds, metadata);
 
@@ -398,6 +459,7 @@ router.post('/rooms', roomCreateLimiter, idempotency, async (req, res) => {
                 serverCreated: true,
                 costPolicy: {
                     tier,
+                    callType,
                     maxDurationSeconds,
                     ringTimeoutSeconds: numberFromEnv('VIDEOSDK_RING_TIMEOUT_SECONDS', 30),
                 },
