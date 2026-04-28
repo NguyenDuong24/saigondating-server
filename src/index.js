@@ -118,7 +118,10 @@ app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'OK',
     timestamp: new Date().toISOString(),
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    nodeVersion: process.version,
+    memoryUsage: process.memoryUsage(),
+    hasFetch: typeof fetch !== 'undefined'
   });
 });
 
@@ -132,10 +135,11 @@ app.use('*', (req, res) => {
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error('[GLOBAL ERROR]', err.stack);
   res.status(500).json({
     error: 'Something went wrong!',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
+    message: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error',
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
   });
 });
 
