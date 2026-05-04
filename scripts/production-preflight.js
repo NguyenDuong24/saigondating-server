@@ -24,7 +24,32 @@ function parseEnvFile(filePath) {
 
 function isLikelyPlaceholder(v) {
   const s = String(v || '').toLowerCase();
-  return !s || s.includes('your_') || s.includes('change_to_') || s.includes('xxxxx') || s.includes('example');
+  return (
+    !s ||
+    s.includes('your_') ||
+    s.includes('your-') ||
+    s.includes('change_to_') ||
+    s.includes('change-to-') ||
+    s.includes('get_from_') ||
+    s.includes('<get_from') ||
+    s.includes('<optional') ||
+    s.includes('xxxxx') ||
+    s.includes('example')
+  );
+}
+
+function mergeEnvFiles(filePaths) {
+  const merged = {};
+  for (const filePath of filePaths) {
+    const parsed = parseEnvFile(filePath);
+    for (const [key, value] of Object.entries(parsed)) {
+      if (isLikelyPlaceholder(value) && merged[key] && !isLikelyPlaceholder(merged[key])) {
+        continue;
+      }
+      merged[key] = value;
+    }
+  }
+  return merged;
 }
 
 function fail(msg, failures) {
@@ -37,19 +62,25 @@ function warn(msg, warnings) {
 
 function main() {
   const root = path.resolve(__dirname, '..');
-  const envPath = path.join(root, '.env.production');
-  const fallbackPath = path.join(root, '.env');
+  const envFiles = [
+    path.join(root, '.env'),
+    path.join(root, '.env.production'),
+    path.join(root, '.env.production.local'),
+  ].filter((candidate) => fs.existsSync(candidate));
   const failures = [];
   const warnings = [];
 
-  const filePath = fs.existsSync(envPath) ? envPath : (fs.existsSync(fallbackPath) ? fallbackPath : null);
-  if (!filePath) {
+  if (!envFiles.length) {
     console.error('✗ Missing .env.production (or .env) in saigondating-server');
     process.exit(1);
   }
 
-  const env = parseEnvFile(filePath);
-  console.log(`Using env file: ${path.basename(filePath)}`);
+  const env = Object.assign(
+    {},
+    mergeEnvFiles(envFiles),
+    process.env
+  );
+  console.log(`Using env files: ${envFiles.map((filePath) => path.basename(filePath)).join(', ')}`);
 
   const required = [
     'NODE_ENV',

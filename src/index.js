@@ -1,4 +1,4 @@
-const express = require('express');
+﻿const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
@@ -75,6 +75,14 @@ const apiLimiter = rateLimit({
   legacyHeaders: false,
 });
 app.use('/api', apiLimiter);
+// Strict limiter for expensive AI and sensitive payment routes
+const strictLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: { error: 'Too many requests, please try again later' }
+});
+app.use('/api/ai-matchmaker', strictLimiter);
+app.use('/api/vietqr/check-pending', strictLimiter);
 // Logging middleware
 app.use(morgan('combined'));
 
@@ -157,9 +165,9 @@ app.use((err, req, res, next) => {
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Saigon Dating Server is running on port ${PORT}`);
-  console.log(`📊 Health check available at http://localhost:${PORT}/health`);
-  console.log(`🔗 API available at http://localhost:${PORT}/api`);
+  console.log(`ðŸš€ Saigon Dating Server is running on port ${PORT}`);
+  console.log(`ðŸ“Š Health check available at http://localhost:${PORT}/health`);
+  console.log(`ðŸ”— API available at http://localhost:${PORT}/api`);
 });
 
 module.exports = app;

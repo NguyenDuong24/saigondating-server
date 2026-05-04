@@ -109,7 +109,7 @@ async function sendPushNotification(uid, { title, body, data }) {
       tokens: userData.fcmTokens,
     };
 
-    const response = await admin.messaging().sendMulticast(message);
+    const response = await admin.messaging().sendEachForMulticast(message);
     console.log('[VIETQR] Push notifications sent:', response.successCount);
   } catch (error) {
     console.error('[VIETQR] Error sending notification:', error);
@@ -776,7 +776,9 @@ router.post('/sms-received', async (req, res) => {
             type: 'unauthorized_device', deviceId: deviceId || 'unknown',
             ip: requestIp, timestamp: Timestamp.now(),
           });
-        } catch (e) { }
+        } catch (_e) {
+          console.warn('[SECURITY] Failed to write unauthorized device log');
+        }
         return res.status(403).json({ success: false, message: 'Unauthorized device' });
       }
       console.log('[SECURITY] âœ… Device API Key verified');
@@ -832,7 +834,9 @@ router.post('/sms-received', async (req, res) => {
           type: 'signature_mismatch', deviceId: deviceId || 'unknown',
           ip: requestIp, timestamp: Timestamp.now(),
         });
-      } catch (e) { }
+      } catch (_e) {
+        console.warn('[SECURITY] Failed to write signature mismatch log');
+      }
       return res.status(401).json({ success: false, message: 'Signature failed' });
     }
 
@@ -894,7 +898,9 @@ router.post('/sms-received', async (req, res) => {
           .where('status', '==', 'pending')
           .limit(1)
           .get();
-      } catch (indexErr) { }
+      } catch (indexErr) {
+        console.warn('[VIETQR SMS] VIP description index query failed');
+      }
     }
 
     // Strategy 3: Search by description with PRO_ prefix
@@ -905,7 +911,9 @@ router.post('/sms-received', async (req, res) => {
           .where('status', '==', 'pending')
           .limit(1)
           .get();
-      } catch (indexErr) { }
+      } catch (indexErr) {
+        console.warn('[VIETQR SMS] PRO description index query failed');
+      }
     }
 
     if (!pendingOrders || pendingOrders.empty) {
@@ -1052,11 +1060,15 @@ router.post('/sms-received', async (req, res) => {
 
       // Send notification to user
       try {
-        await sendNotification(
-          uid,
-          'âœ… Náº¡p xu thÃ nh cÃ´ng!',
-          `Báº¡n vá»«a náº¡p ${coinsAdded} xu tá»« thanh toÃ¡n VietQR`
-        );
+        await sendPushNotification(uid, {
+          title: 'Payment completed',
+          body: `You received ${coinsAdded} coins from VietQR payment`,
+          data: {
+            orderId,
+            coins: String(coinsAdded),
+            verificationMethod: 'sms_banking',
+          },
+        });
       } catch (notifError) {
         console.error('[VIETQR SMS] Notification failed:', notifError);
         // Don't fail the whole request if notification fails
@@ -1100,14 +1112,14 @@ function parseSmsContent(message) {
     // Matches: "2,000VND", "+2.000Ä‘", "so tien 50000d", "GD: +50,000 VND", "2000 VND", "2.000"
     let amount = 0;
     const amountPatterns = [
-      /([\d][\d\.,]{3,})\s*(?:VND|vnd|Ä‘|d)/i,      // 2,000VND or 2000 Ä‘
-      /(?:\+|CD\s*|so\s*tien\s*|GD[:\s]*\+?)([\d][\d\.,]{3,})/i, // +2.000 or so tien 2.000
-      /([\d][\d\.,]{3,})(?:\s*[dÄ‘v]|\s*$)/i,       // 2.000d or just 2.000 at end
+      /([\d][\d.,]{3,})\s*(?:VND|vnd|Ä‘|d)/i,      // 2,000VND or 2000 Ä‘
+      /(?:\+|CD\s*|so\s*tien\s*|GD[:\s]*\+?)([\d][\d.,]{3,})/i, // +2.000 or so tien 2.000
+      /([\d][\d.,]{3,})(?:\s*[dÄ‘v]|\s*$)/i,       // 2.000d or just 2.000 at end
     ];
     for (const pattern of amountPatterns) {
       const match = message.match(pattern);
       if (match) {
-        amount = parseInt(match[1].replace(/[\.,]/g, ''), 10);
+        amount = parseInt(match[1].replace(/[.,]/g, ''), 10);
         if (amount >= 1000) break; // Most VCB payments are >= 1000
       }
     }
@@ -1249,17 +1261,9 @@ router.post('/check-pending', async (req, res) => {
  * Check payment status via banking API
  * This is a template - implement with actual banking API
  */
-async function checkPaymentStatusViaAPI(order) {
-  try {
-    // TODO: Implement with actual banking API
-    // Example: VietQR API, Vietcombank API, etc.
-
-    // Placeholder - return false (not verified via API)
-    return false;
-  } catch (error) {
-    console.error('[VIETQR] Error checking payment via API:', error);
-    return false;
-  }
+async function checkPaymentStatusViaAPI(_order) {
+  // TODO: Implement with actual banking API.
+  return false;
 }
 
 // ==============================================================
@@ -1290,8 +1294,7 @@ function startPollingService() {
       }
 
       // Check each order (webhook may have failed)
-      for (const doc of pendingOrders.docs) {
-        const order = doc.data();
+      for (const _doc of pendingOrders.docs) {
         // Orders in Database, webhook will update when received
         // This is just a safety check
       }
