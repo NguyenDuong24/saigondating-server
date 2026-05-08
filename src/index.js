@@ -99,6 +99,7 @@ const userRoutes = require('./routes/user');
 const videosdkRoutes = require('./routes/videosdk');
 const momoRoutes = require('./routes/momo');
 const vietqrRoutes = require('./routes/vietqr');
+const iapRoutes = require('./routes/iap');
 const adminRoutes = require('./routes/admin');
 const aiMatchmakerRoutes = require('./routes/aiMatchmaker');
 
@@ -116,6 +117,7 @@ app.use('/api/user', userRoutes);
 app.use('/api/videosdk', videosdkRoutes);
 app.use('/api/momo', momoRoutes);
 app.use('/api/vietqr', vietqrRoutes);
+app.use('/api/iap', iapRoutes);
 app.use('/api/ai-matchmaker', aiMatchmakerRoutes);
 
 // Admin routes (protected with both auth and admin check)
