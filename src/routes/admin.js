@@ -373,7 +373,12 @@ router.get('/settings/ads', async (req, res) => {
                 settings: {
                     rewardAmount: 10,
                     dailyLimit: 5,
-                    enabled: true
+                    enabled: true,
+                    interstitialEnabled: true,
+                    interstitialShowRate: 0.25,
+                    minSecondsBetweenInterstitials: 180,
+                    androidInterstitialAdUnitId: '',
+                    iosInterstitialAdUnitId: ''
                 }
             });
         }
@@ -398,12 +403,26 @@ router.get('/settings/ads', async (req, res) => {
  */
 router.put('/settings/ads', async (req, res) => {
     try {
-        const { rewardAmount, dailyLimit, enabled } = req.body;
+        const {
+            rewardAmount,
+            dailyLimit,
+            enabled,
+            interstitialEnabled,
+            interstitialShowRate,
+            minSecondsBetweenInterstitials,
+            androidInterstitialAdUnitId,
+            iosInterstitialAdUnitId
+        } = req.body;
 
         await db.collection('system_config').doc('ad_settings').set({
             rewardAmount: Number(rewardAmount),
             dailyLimit: Number(dailyLimit),
             enabled: Boolean(enabled),
+            interstitialEnabled: interstitialEnabled !== false,
+            interstitialShowRate: Math.max(0, Math.min(1, Number(interstitialShowRate ?? 0.25))),
+            minSecondsBetweenInterstitials: Math.max(30, Number(minSecondsBetweenInterstitials ?? 180)),
+            androidInterstitialAdUnitId: String(androidInterstitialAdUnitId || ''),
+            iosInterstitialAdUnitId: String(iosInterstitialAdUnitId || ''),
             updatedAt: FieldValue.serverTimestamp(),
             updatedBy: req.user.uid
         });
@@ -415,6 +434,45 @@ router.put('/settings/ads', async (req, res) => {
     } catch (error) {
         console.error('Error updating ad settings:', error);
         res.status(500).json({ error: 'Failed to update ad settings' });
+    }
+});
+
+router.get('/settings/new-chat', async (req, res) => {
+    try {
+        const doc = await db.collection('system_config').doc('new_chat_settings').get();
+        res.json({
+            success: true,
+            settings: doc.exists ? doc.data() : {
+                enabled: true,
+                freeDailyLimit: 5,
+                proDailyLimit: 20,
+                unlockCostBanhMi: 1,
+                unlockCostCoins: 10,
+            }
+        });
+    } catch (error) {
+        console.error('Error getting new chat settings:', error);
+        res.status(500).json({ error: 'Failed to get new chat settings' });
+    }
+});
+
+router.put('/settings/new-chat', async (req, res) => {
+    try {
+        const { enabled, freeDailyLimit, proDailyLimit, unlockCostBanhMi, unlockCostCoins } = req.body;
+        await db.collection('system_config').doc('new_chat_settings').set({
+            enabled: enabled !== false,
+            freeDailyLimit: Math.max(0, Number(freeDailyLimit ?? 5)),
+            proDailyLimit: Math.max(0, Number(proDailyLimit ?? 20)),
+            unlockCostBanhMi: Math.max(0, Number(unlockCostBanhMi ?? 1)),
+            unlockCostCoins: Math.max(0, Number(unlockCostCoins ?? 10)),
+            updatedAt: FieldValue.serverTimestamp(),
+            updatedBy: req.user.uid
+        }, { merge: true });
+
+        res.json({ success: true, message: 'New chat settings updated successfully' });
+    } catch (error) {
+        console.error('Error updating new chat settings:', error);
+        res.status(500).json({ error: 'Failed to update new chat settings' });
     }
 });
 
