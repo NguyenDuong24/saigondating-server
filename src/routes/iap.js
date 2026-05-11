@@ -35,11 +35,9 @@ const IAP_PRODUCTS = {
  */
 async function verifyGooglePlayPurchase(purchaseToken, productId, packageName) {
   try {
-    // If googleapis not installed or no service account, skip server-side verify
     const serviceAccountJson = process.env.GOOGLE_PLAY_SERVICE_ACCOUNT;
     if (!serviceAccountJson) {
-      console.log('[IAP] No GOOGLE_PLAY_SERVICE_ACCOUNT — skipping server-side Google Play verify');
-      return null; // null = skipped, not failed
+      throw new Error('GOOGLE_PLAY_SERVICE_ACCOUNT is required for production IAP verification');
     }
 
     const { google } = require('googleapis');
@@ -76,8 +74,7 @@ async function verifyGooglePlayPurchase(purchaseToken, productId, packageName) {
     };
   } catch (err) {
     console.error('[IAP] Google Play verification error:', err.message);
-    // Don't fail — fall back to basic validation
-    return { valid: true, warning: 'server_verify_failed' };
+    return { valid: false, error: err.message };
   }
 }
 
@@ -296,13 +293,16 @@ router.post('/verify', async (req, res) => {
       });
     }
 
-    // ── Google Play server-side verification (if configured) ─
-    if (safePlatform === 'android' && receipt) {
-      const googleResult = await verifyGooglePlayPurchase(
+    let googleResult = null;
+    if (safePlatform === 'android') {
+      if (!receipt) {
+        return res.status(400).json({ success: false, error: 'Missing Google Play purchase token' });
+      }
+      googleResult = await verifyGooglePlayPurchase(
         String(receipt),
         safeProductId,
       );
-      if (googleResult && !googleResult.valid) {
+      if (!googleResult?.valid) {
         return res.status(400).json({
           success: false,
           error: 'Purchase verification failed',
@@ -318,7 +318,7 @@ router.post('/verify', async (req, res) => {
       const totalCoins = await creditCoins(
         uid,
         safeProductId,
-        safeTransactionId,
+        googleResult?.orderId || safeTransactionId,
         product.coins,
         product.bonus,
       );
@@ -330,7 +330,7 @@ router.post('/verify', async (req, res) => {
       const proResult = await activatePro(
         uid,
         safeProductId,
-        safeTransactionId,
+        googleResult?.orderId || safeTransactionId,
         product.durationDays,
       );
       result = {
@@ -367,3 +367,5 @@ router.post('/verify', async (req, res) => {
 });
 
 module.exports = router;
+
+
