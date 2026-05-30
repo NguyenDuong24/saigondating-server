@@ -97,6 +97,7 @@ function main() {
     'PRO_UPGRADE_PRICE',
     'VIDEOSDK_API_KEY',
     'VIDEOSDK_SECRET_KEY',
+    'GOOGLE_PLAY_SERVICE_ACCOUNT',
   ];
 
   for (const k of required) {

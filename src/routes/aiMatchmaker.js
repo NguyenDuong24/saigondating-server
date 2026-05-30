@@ -47,6 +47,16 @@ const STOPWORDS = new Set([
   'de', 'di', 'cho', 'co', 'la', 'o', 'gan', 'thich', 'hop', 'vui', 'nay',
   'hom', 'nay', 'can', 'gap', 'neu', 'nhung', 'cac', 'va', 'hoac', 'the',
 ]);
+const PERSONALITY_ALIASES = [
+  { value: 'noi chuyen sau', terms: ['noi chuyen sau', 'deep talk', 'sau sac', 'co chieu sau'] },
+  { value: 'tinh te', terms: ['tinh te', 'lich su', 'nhe nhang', 'diu dang'] },
+  { value: 'hai huoc', terms: ['hai huoc', 'vui tinh', 'vui ve', 'humor', 'funny'] },
+  { value: 'truong thanh', terms: ['truong thanh', 'chin chan', 'nghiem tuc'] },
+  { value: 'chan thanh', terms: ['chan thanh', 'that long', 'thang than'] },
+  { value: 'chill', terms: ['chill', 'de gan', 'thoai mai', 'khong drama'] },
+  { value: 'nang dong', terms: ['nang dong', 'huong ngoai', 'active'] },
+  { value: 'huong noi', terms: ['huong noi', 'it noi', 'introvert'] },
+];
 const ADULT_ONLY_MATCHMAKER_MESSAGE = 'Để an toàn, ChappAt chỉ gợi ý hồ sơ từ 18 tuổi trở lên. Bạn chọn một khoảng tuổi 18+ nhé.';
 const ADULT_AGE_REPLIES = ['18-25 tuổi', '22-28 tuổi', '25-32 tuổi'];
 
@@ -334,6 +344,8 @@ async function callAiIntent(prompt, viewer, apiKey) {
               'Return compact JSON only. Do not include explanations.',
               'Schema: genders string[], minAge number|null, maxAge number|null, interests string[], jobs string[], educationLevels string[], cities string[], relationshipGoals string[], keywords string[], radiusKm number|null, personality string[], dealbreakers string[].',
               'Use normalized gender values: male, female.',
+              'Capture soft dating preferences such as deep talk, tinh te, hai huoc, truong thanh, chan thanh, chill, introvert or active inside personality.',
+              'Treat safety and consent as hard constraints: never create under-18 dating intent.',
             ].join(' '),
           },
           {
@@ -579,6 +591,9 @@ function buildHeuristicIntent(prompt) {
   const cities = CITY_ALIASES
     .filter((entry) => entry.terms.some((term) => text.includes(term)))
     .map((entry) => entry.value);
+  const personality = PERSONALITY_ALIASES
+    .filter((entry) => entry.terms.some((term) => text.includes(term)))
+    .map((entry) => entry.value);
   const relationshipGoals = [];
   if (/(nghiem tuc|lau dai|ket hon|serious|long term)/.test(text)) relationshipGoals.push('serious');
   if (/(hen ho|dating|date|nguoi yeu|yeu duong|lover|relationship)/.test(text)) relationshipGoals.push('dating');
@@ -603,7 +618,7 @@ function buildHeuristicIntent(prompt) {
     relationshipGoals,
     keywords,
     radiusKm: radiusMatch ? Number(radiusMatch[1]) : null,
-    personality: [],
+    personality,
     dealbreakers: [],
   });
 }
@@ -741,6 +756,15 @@ function rankCandidates(candidates, viewer, intent, prompt, viewerLocation) {
       if (keywordHits.length) {
         score += Math.min(24, keywordHits.length * 5);
         reasons.push(`Khop tu khoa ${keywordHits.slice(0, 2).join(', ')}`);
+      }
+
+      const personalityHits = intent.personality.filter((trait) => {
+        const term = normalize(trait);
+        return term.length > 2 && candidateText.includes(term);
+      });
+      if (personalityHits.length) {
+        score += Math.min(18, personalityHits.length * 7);
+        reasons.push(`Dung vibe ${personalityHits.slice(0, 2).join(', ')}`);
       }
 
       const cityHit = intent.cities.find((city) => candidateText.includes(normalize(city)));
