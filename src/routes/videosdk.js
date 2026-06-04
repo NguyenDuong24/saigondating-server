@@ -294,14 +294,20 @@ async function assertCanJoinRoom(uid, roomId) {
 }
 
 /**
- * Reserve daily quota for a call.
+ * Reserve daily quota for a call creation.
+ *
+ * IMPORTANT: This function ONLY checks limits and increments call count.
+ * It does NOT deduct audioSecondsUsed/videoSecondsUsed here.
+ *
+ * Actual seconds are deducted later via:
+ *   - POST /api/videosdk/call-ended (preferred, frontend reports real duration)
+ *   - Cloud Function refundCancelledCallQuota (safety net, deducts maxDuration on timeout/cancel)
+ *
  * Tracks:
  *   - callsCreated          (total calls today)
- *   - audioSecondsUsed      (cumulative audio seconds budget consumed)
- *   - videoSecondsUsed      (cumulative video seconds budget consumed)
  *   - cooldownUntil          (anti-spam cooldown)
  *
- * Returns the max allowed seconds for THIS call.
+ * Returns { maxDurationForThisCall, remainingBudget } so the caller knows limits.
  */
 async function reserveDailyQuota(uid, tier, callType) {
     const dayKey = getDayKey();
@@ -334,6 +340,7 @@ async function reserveDailyQuota(uid, tier, callType) {
     const cooldownSeconds = numberFromEnv('VIDEOSDK_CREATE_COOLDOWN_SECONDS', 8);
 
     let maxDurationForThisCall = 0;
+    let remainingBudget = 0;
 
     await db.runTransaction(async (transaction) => {
         const usageSnap = await transaction.get(usageRef);
@@ -367,7 +374,7 @@ async function reserveDailyQuota(uid, tier, callType) {
         const dailyBudget = isVideo ? dailyVideoBudget : dailyAudioBudget;
         const maxPerCall = isVideo ? maxPerCallVideo : maxPerCallAudio;
 
-        const remainingBudget = Math.max(0, dailyBudget - usedSeconds);
+        remainingBudget = Math.max(0, dailyBudget - usedSeconds);
         if (remainingBudget <= 0) {
             const typeLabel = isVideo ? 'video' : 'thoại';
             const error = new Error(`Bạn đã hết thời lượng cuộc gọi ${typeLabel} miễn phí hôm nay`);
@@ -380,16 +387,13 @@ async function reserveDailyQuota(uid, tier, callType) {
         // The call gets the lesser of: per-call max OR remaining daily budget
         maxDurationForThisCall = Math.min(maxPerCall, remainingBudget);
 
-        // Reserve the full max duration optimistically.
-        // (A post-call webhook or client report can refund unused seconds later if needed.)
-        const budgetField = isVideo ? 'videoSecondsUsed' : 'audioSecondsUsed';
-
+        // ✅ CHỈ increment callsCreated + set cooldown, KHÔNG trừ seconds.
+        // Seconds sẽ được trừ khi call kết thúc thật sự qua endpoint /call-ended.
         transaction.set(usageRef, {
             uid,
             dayKey,
             tier,
             callsCreated: FieldValue.increment(1),
-            [budgetField]: FieldValue.increment(maxDurationForThisCall),
             [`${callType}CallsCreated`]: FieldValue.increment(1),
             cooldownUntil: Timestamp.fromMillis(Date.now() + cooldownSeconds * 1000),
             updatedAt: now,
@@ -397,7 +401,7 @@ async function reserveDailyQuota(uid, tier, callType) {
         }, { merge: true });
     });
 
-    return maxDurationForThisCall;
+    return { maxDurationForThisCall, remainingBudget };
 }
 
 function sanitizeMetadata(metadata) {
@@ -550,8 +554,8 @@ router.post('/rooms', roomCreateLimiter, idempotency, async (req, res) => {
         const roomId = await createVideoSdkRoom(uid);
         const joinToken = signVideoSdkToken(uid, { roomId });
 
-        // Now that we have a real room, deduct from the daily budget
-        const maxDurationSeconds = await reserveDailyQuota(uid, tier, receiverId ? callType : 'room');
+        // Now that we have a real room, check limits and reserve a call slot
+        const { maxDurationForThisCall: maxDurationSeconds, remainingBudget } = await reserveDailyQuota(uid, tier, receiverId ? callType : 'room');
 
         await rememberVideoRoom(roomId, uid, receiverId, tier, maxDurationSeconds, metadata);
 
@@ -605,6 +609,126 @@ router.post('/rooms', roomCreateLimiter, idempotency, async (req, res) => {
             code: error.code || 'VIDEOSDK_ROOM_FAILED',
             error: error.status ? error.message : 'Failed to create VideoSDK room',
             details: error.details,
+        });
+    }
+});
+
+/**
+ * POST /videosdk/call-ended
+ * Called by the frontend when a call ends.
+ * Deducts actual seconds used from the daily budget.
+ *
+ * Body:
+ *   - callId: string (required) - Firestore call document ID
+ *   - secondsUsed: integer - actual connected seconds (from connectedAt to endedAt)
+ *   - callType: 'audio' | 'video' (required)
+ *   - connectedAt: string (ISO date) - when both peers actually joined
+ *   - endedAt: string (ISO date) - when the call ended
+ *
+ * Only the call's callerId is charged. The receiver is not charged.
+ */
+router.post('/call-ended', async (req, res) => {
+    try {
+        const uid = req.user.uid;
+        const callId = typeof req.body?.callId === 'string' ? req.body.callId.trim() : '';
+        const callType = typeof req.body?.callType === 'string' ? req.body.callType.trim() : 'audio';
+        const secondsUsed = boundedNumber(req.body?.secondsUsed, 0, 0, 86400); // max 24h
+        const connectedAtRaw = typeof req.body?.connectedAt === 'string' ? req.body.connectedAt.trim() : '';
+        const endedAtRaw = typeof req.body?.endedAt === 'string' ? req.body.endedAt.trim() : '';
+
+        if (!callId) {
+            return res.status(400).json({ success: false, code: 'MISSING_CALL_ID', error: 'callId is required' });
+        }
+        if (!CALL_TYPES.has(callType)) {
+            return res.status(400).json({ success: false, code: 'INVALID_CALL_TYPE', error: 'Invalid call type' });
+        }
+
+        // Verify the call exists and user is the caller
+        const callDoc = await db.collection('calls').doc(callId).get();
+        if (!callDoc.exists) {
+            return res.status(404).json({ success: false, code: 'CALL_NOT_FOUND', error: 'Call not found' });
+        }
+
+        const callData = callDoc.data() || {};
+        if (callData.callerId !== uid) {
+            return res.status(403).json({ success: false, code: 'NOT_CALLER', error: 'Only the caller is charged for this call' });
+        }
+
+        // Prevent double deduction
+        if (callData.quotaDeducted === true) {
+            console.log(`[call-ended] Call ${callId} already had quota deducted.`);
+            return res.json({ success: true, message: 'Already processed', alreadyDeducted: true });
+        }
+
+        // Calculate actual seconds
+        let actualSeconds = secondsUsed;
+        if (actualSeconds <= 0 && connectedAtRaw && endedAtRaw) {
+            const connected = new Date(connectedAtRaw);
+            const ended = new Date(endedAtRaw);
+            if (!isNaN(connected.getTime()) && !isNaN(ended.getTime())) {
+                actualSeconds = Math.max(0, Math.floor((ended.getTime() - connected.getTime()) / 1000));
+            }
+        }
+
+        // If the call was never connected, don't deduct anything
+        if (actualSeconds <= 0) {
+            // Just mark as processed
+            await callDoc.ref.update({
+                quotaDeducted: true,
+                quotaDeductedAt: Timestamp.now(),
+                quotaDeductedSeconds: 0,
+                quotaDeductedReason: 'no_connection',
+            });
+            console.log(`[call-ended] Call ${callId} had 0 seconds, no deduction.`);
+            return res.json({ success: true, secondsDeducted: 0, message: 'No connection, no deduction' });
+        }
+
+        const maxDuration = callData.costPolicy?.maxDurationSeconds || (callType === 'audio' ? 1200 : 300);
+        const cappedSeconds = Math.min(actualSeconds, maxDuration);
+
+        const dayKey = callData.dayKey || getDayKey();
+        const usageDocId = `${uid}_${dayKey}`;
+        const usageRef = db.collection('call_usage').doc(usageDocId);
+
+        await db.runTransaction(async (transaction) => {
+            const usageSnap = await transaction.get(usageRef);
+            if (!usageSnap.exists) {
+                // Create usage doc if it doesn't exist (should have been created by reserveDailyQuota)
+                transaction.set(usageRef, {
+                    uid,
+                    dayKey,
+                    tier: callData.costPolicy?.tier || 'free',
+                    audioSecondsUsed: callType === 'audio' ? cappedSeconds : 0,
+                    videoSecondsUsed: callType === 'video' ? cappedSeconds : 0,
+                    updatedAt: Timestamp.now(),
+                    createdAt: Timestamp.now(),
+                });
+            } else {
+                const field = callType === 'audio' ? 'audioSecondsUsed' : 'videoSecondsUsed';
+                transaction.update(usageRef, {
+                    [field]: FieldValue.increment(cappedSeconds),
+                    updatedAt: Timestamp.now(),
+                });
+            }
+
+            // Mark call as deducted
+            transaction.update(callDoc.ref, {
+                quotaDeducted: true,
+                quotaDeductedAt: Timestamp.now(),
+                quotaDeductedSeconds: cappedSeconds,
+                quotaDeductedReason: `actual_usage: ${cappedSeconds}s (raw: ${actualSeconds}s)`,
+            });
+        });
+
+        console.log(`[call-ended] ✅ Deducted ${cappedSeconds}s from ${uid} for ${callType} call ${callId}`);
+        res.json({ success: true, secondsDeducted: cappedSeconds });
+
+    } catch (error) {
+        console.error('[call-ended] Error:', error);
+        res.status(error.status || 500).json({
+            success: false,
+            code: error.code || 'CALL_ENDED_FAILED',
+            error: error.message || 'Failed to process call end',
         });
     }
 });
