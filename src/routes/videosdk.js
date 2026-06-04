@@ -541,17 +541,26 @@ router.post('/rooms', roomCreateLimiter, idempotency, async (req, res) => {
             if (!isValidId(receiverId, 128)) {
                 return res.status(400).json({ success: false, code: 'INVALID_RECEIVER', error: 'Invalid receiverId' });
             }
-            await assertReceiverExists(receiverId);
-            await assertNotBlocked(uid, receiverId);
-            await assertNoActiveOutgoingCall(uid);
         }
 
-        const tier = await getUserTier(uid);
+        // ⚡ PARALLEL: Chạy tất cả pre-flight checks và VideoSDK room creation cùng lúc.
+        // Các check là độc lập, không phụ thuộc nhau.
+        const preflightChecks = [];
+        if (receiverId) {
+            preflightChecks.push(
+                assertReceiverExists(receiverId),
+                assertNotBlocked(uid, receiverId),
+                assertNoActiveOutgoingCall(uid),
+            );
+        }
+        preflightChecks.push(getUserTier(uid));
+        preflightChecks.push(createVideoSdkRoom(uid));
 
-        // ── IMPORTANT: Create the VideoSDK room FIRST, then reserve quota.
-        // If we reserve quota first and the VideoSDK API fails, the user gets
-        // stuck in a 8s cooldown for no reason.
-        const roomId = await createVideoSdkRoom(uid);
+        const results = await Promise.all(preflightChecks);
+        // results: [receiverExists (void), notBlocked (void), noActiveCall (void), tier (string), roomId (string)]
+        // nếu không có receiverId thì: [tier (string), roomId (string)]
+        const tier = receiverId ? results[results.length - 2] : results[results.length - 2];
+        const roomId = results[results.length - 1];
         const joinToken = signVideoSdkToken(uid, { roomId });
 
         // Now that we have a real room, check limits and reserve a call slot
@@ -577,7 +586,7 @@ router.post('/rooms', roomCreateLimiter, idempotency, async (req, res) => {
                     tier,
                     callType,
                     maxDurationSeconds,
-                    ringTimeoutSeconds: numberFromEnv('VIDEOSDK_RING_TIMEOUT_SECONDS', 30),
+                    ringTimeoutSeconds: numberFromEnv('VIDEOSDK_RING_TIMEOUT_SECONDS', 45),
                 },
                 metadata,
             });
