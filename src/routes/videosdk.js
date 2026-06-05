@@ -323,7 +323,7 @@ async function reserveDailyQuota(uid, tier, callType) {
 
     const dailyAudioBudget = isPremium
         ? numberFromEnv('VIDEOSDK_DAILY_AUDIO_SECONDS_PREMIUM', 120 * 60)
-        : numberFromEnv('VIDEOSDK_DAILY_AUDIO_SECONDS_FREE', 20 * 60);
+        : numberFromEnv('VIDEOSDK_DAILY_AUDIO_SECONDS_FREE', 30 * 60);
 
     const dailyVideoBudget = isPremium
         ? numberFromEnv('VIDEOSDK_DAILY_VIDEO_SECONDS_PREMIUM', 60 * 60)
@@ -331,7 +331,7 @@ async function reserveDailyQuota(uid, tier, callType) {
 
     const maxPerCallAudio = isPremium
         ? numberFromEnv('VIDEOSDK_MAX_AUDIO_CALL_SECONDS_PREMIUM', 60 * 60)
-        : numberFromEnv('VIDEOSDK_MAX_AUDIO_CALL_SECONDS_FREE', 20 * 60);
+        : numberFromEnv('VIDEOSDK_MAX_AUDIO_CALL_SECONDS_FREE', 60 * 60);
 
     const maxPerCallVideo = isPremium
         ? numberFromEnv('VIDEOSDK_MAX_VIDEO_CALL_SECONDS_PREMIUM', 30 * 60)
