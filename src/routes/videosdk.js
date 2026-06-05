@@ -323,11 +323,11 @@ async function reserveDailyQuota(uid, tier, callType) {
 
     const dailyAudioBudget = isPremium
         ? numberFromEnv('VIDEOSDK_DAILY_AUDIO_SECONDS_PREMIUM', 120 * 60)
-        : numberFromEnv('VIDEOSDK_DAILY_AUDIO_SECONDS_FREE', 30 * 60);
+        : numberFromEnv('VIDEOSDK_DAILY_AUDIO_SECONDS_FREE', 60 * 60);
 
     const dailyVideoBudget = isPremium
         ? numberFromEnv('VIDEOSDK_DAILY_VIDEO_SECONDS_PREMIUM', 60 * 60)
-        : numberFromEnv('VIDEOSDK_DAILY_VIDEO_SECONDS_FREE', 5 * 60);
+        : numberFromEnv('VIDEOSDK_DAILY_VIDEO_SECONDS_FREE', 30 * 60);
 
     const maxPerCallAudio = isPremium
         ? numberFromEnv('VIDEOSDK_MAX_AUDIO_CALL_SECONDS_PREMIUM', 60 * 60)
@@ -335,7 +335,7 @@ async function reserveDailyQuota(uid, tier, callType) {
 
     const maxPerCallVideo = isPremium
         ? numberFromEnv('VIDEOSDK_MAX_VIDEO_CALL_SECONDS_PREMIUM', 30 * 60)
-        : numberFromEnv('VIDEOSDK_MAX_VIDEO_CALL_SECONDS_FREE', 5 * 60);
+        : numberFromEnv('VIDEOSDK_MAX_VIDEO_CALL_SECONDS_FREE', 30 * 60);
 
     const cooldownSeconds = numberFromEnv('VIDEOSDK_CREATE_COOLDOWN_SECONDS', 8);
 
@@ -692,7 +692,7 @@ router.post('/call-ended', async (req, res) => {
             return res.json({ success: true, secondsDeducted: 0, message: 'No connection, no deduction' });
         }
 
-        const maxDuration = callData.costPolicy?.maxDurationSeconds || (callType === 'audio' ? 1200 : 300);
+        const maxDuration = callData.costPolicy?.maxDurationSeconds || (callType === 'audio' ? 3600 : 1800);
         const cappedSeconds = Math.min(actualSeconds, maxDuration);
 
         const dayKey = callData.dayKey || getDayKey();
