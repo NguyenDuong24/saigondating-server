@@ -252,7 +252,7 @@ router.post('/search', async (req, res) => {
 
 async function analyzePrompt(prompt, viewer) {
   const fallbackIntent = buildHeuristicIntent(prompt);
-  const apiKey = process.env.AI_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
+  const apiKey = process.env.AI_API_KEY || process.env.DEEPSEEK_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
 
   if (!apiKey) {
     return { intent: fallbackIntent, source: 'heuristic' };
@@ -281,10 +281,11 @@ async function postAiChatCompletion({ baseUrl, apiKey, timeoutMs, payload }) {
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
-        ...(baseUrl.includes('openrouter.ai') ? {
-          'HTTP-Referer': process.env.AI_HTTP_REFERER || 'https://saigondating-server.onrender.com',
-          'X-Title': process.env.AI_APP_NAME || 'Saigon Dating',
-        } : {}),
+        ...(baseUrl.includes('deepseek.com') ? {} : 
+          baseUrl.includes('openrouter.ai') ? {
+            'HTTP-Referer': process.env.AI_HTTP_REFERER || 'https://saigondating-server.onrender.com',
+            'X-Title': process.env.AI_APP_NAME || 'Saigon Dating',
+          } : {}),
       },
       body: JSON.stringify(payload),
     });
@@ -293,8 +294,23 @@ async function postAiChatCompletion({ baseUrl, apiKey, timeoutMs, payload }) {
   }
 }
 
+function getAiBaseUrl() {
+  if (process.env.DEEPSEEK_API_KEY) {
+    return (process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1').replace(/\/$/, '');
+  }
+  if (process.env.OPENROUTER_API_KEY) {
+    return 'https://openrouter.ai/api/v1';
+  }
+  if (process.env.OPENAI_API_KEY) {
+    return 'https://api.openai.com/v1';
+  }
+  return '';
+}
+
 function getAiModelCandidates(primaryModel) {
+  const isDeepSeek = Boolean(process.env.DEEPSEEK_API_KEY);
   const fallbackModels = String(process.env.AI_MODEL_FALLBACKS || [
+    ...isDeepSeek ? ['deepseek-chat', 'deepseek-coder'] : [],
     'openai/gpt-oss-20b:free',
     'meta-llama/llama-3.3-70b-instruct:free',
     'google/gemma-3-27b-it:free',
@@ -312,17 +328,14 @@ function shouldTryNextAiModel(status) {
 
 function hasAiTextProvider() {
   return Boolean(
-    (process.env.AI_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY) &&
+    (process.env.AI_API_KEY || process.env.DEEPSEEK_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY) &&
     process.env.AI_CHAT_ENABLED !== 'false'
   );
 }
 
 async function callAiIntent(prompt, viewer, apiKey) {
-  const hasOpenRouterKey = Boolean(process.env.OPENROUTER_API_KEY);
-  const baseUrl = (process.env.AI_BASE_URL || (hasOpenRouterKey
-    ? 'https://openrouter.ai/api/v1'
-    : 'https://api.openai.com/v1')).replace(/\/$/, '');
-  const primaryModel = process.env.AI_MODEL || (hasOpenRouterKey ? 'openai/gpt-4o-mini' : 'gpt-4o-mini');
+  const baseUrl = getAiBaseUrl() || (process.env.AI_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
+  const primaryModel = process.env.AI_MODEL || (baseUrl.includes('deepseek.com') ? 'deepseek-chat' : 'openai/gpt-4o-mini');
   const models = getAiModelCandidates(primaryModel);
   const timeoutMs = Number(process.env.AI_TIMEOUT_MS || 8000);
   let lastError = null;
@@ -380,12 +393,9 @@ async function callAiIntent(prompt, viewer, apiKey) {
 }
 
 async function callAiText(messages, apiKey, options = {}) {
-  const hasOpenRouterKey = Boolean(process.env.OPENROUTER_API_KEY);
-  const baseUrl = (process.env.AI_BASE_URL || (hasOpenRouterKey
-    ? 'https://openrouter.ai/api/v1'
-    : 'https://api.openai.com/v1')).replace(/\/$/, '');
+  const baseUrl = getAiBaseUrl() || (process.env.AI_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
   const primaryModel = options.model || process.env.AI_CHAT_MODEL || process.env.AI_MODEL ||
-    (hasOpenRouterKey ? 'openai/gpt-4o-mini' : 'gpt-4o-mini');
+    (baseUrl.includes('deepseek.com') ? 'deepseek-chat' : 'openai/gpt-4o-mini');
   const models = getAiModelCandidates(primaryModel);
   const timeoutMs = Number(process.env.AI_CHAT_TIMEOUT_MS || process.env.AI_TIMEOUT_MS || 12000);
   let lastError = null;
@@ -425,7 +435,7 @@ async function composeAiAssistantMessage({
   needsMoreInfo,
   fallback,
 }) {
-  const apiKey = process.env.AI_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
+  const apiKey = process.env.AI_API_KEY || process.env.DEEPSEEK_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
   if (!apiKey || process.env.AI_CHAT_ENABLED === 'false') return fallback;
 
   try {
@@ -491,7 +501,7 @@ async function composeCasualAssistantMessage({
   proactiveSuggestion,
   fallback,
 }) {
-  const apiKey = process.env.AI_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
+  const apiKey = process.env.AI_API_KEY || process.env.DEEPSEEK_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
   if (!apiKey || process.env.AI_CHAT_ENABLED === 'false') return fallback;
 
   try {
