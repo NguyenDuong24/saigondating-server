@@ -17,29 +17,32 @@ const MAX_CANDIDATE_LIMIT = 500;
 const MATCHMAKER_TIMEZONE = process.env.AI_MATCHMAKER_TIMEZONE || 'Asia/Ho_Chi_Minh';
 
 const INTEREST_ALIASES = [
-  { value: 'Cafe', terms: ['cafe', 'coffee', 'ca phe', 'caphe', 'tra sua'] },
-  { value: 'Du lich', terms: ['du lich', 'travel', 'phuot', 'trip', 'di choi xa'] },
-  { value: 'Am nhac', terms: ['am nhac', 'music', 'hat', 'karaoke', 'concert'] },
-  { value: 'Phim', terms: ['phim', 'movie', 'cinema', 'netflix'] },
-  { value: 'Game', terms: ['game', 'gaming', 'esport'] },
-  { value: 'Gym', terms: ['gym', 'fitness', 'tap gym', 'the thao'] },
-  { value: 'Yoga', terms: ['yoga', 'thien'] },
-  { value: 'Chay bo', terms: ['chay bo', 'running', 'marathon'] },
-  { value: 'Sach', terms: ['sach', 'book', 'doc sach'] },
-  { value: 'Chup anh', terms: ['chup anh', 'photography', 'photo'] },
-  { value: 'An uong', terms: ['an uong', 'food', 'foodie', 'nau an'] },
-  { value: 'Thu cung', terms: ['thu cung', 'pet', 'cho', 'meo'] },
-  { value: 'Nghe thuat', terms: ['nghe thuat', 'art', 've tranh', 'design'] },
-  { value: 'Startup', terms: ['startup', 'kinh doanh', 'business'] },
+  { value: 'Cafe', terms: ['cafe', 'coffee', 'ca phe', 'caphe', 'tra sua', 'highlands', 'starbucks'] },
+  { value: 'Du lich', terms: ['du lich', 'travel', 'phuot', 'trip', 'di choi xa', 'backpacking', 'xuyen viet', 'nhat ban', 'han quoc', 'thai lan', 'chau au', 'trung quoc', 'du lich nuoc ngoai'] },
+  { value: 'Am nhac', terms: ['am nhac', 'music', 'hat', 'karaoke', 'concert', 'nhac', 'rap', 'hiphop', 'rock', 'pop', 'bolero', 'nhac tre', 'ballad', 'nhac viet', 'edmviet', 'dj', 'piano', 'guitar', 'ukulele', 'violin'] },
+  { value: 'Phim', terms: ['phim', 'movie', 'cinema', 'netflix', 'phim han', 'phim nhat', 'phim my', 'marvel', 'anime', 'manga', 'disney', 'phim rap'] },
+  { value: 'Game', terms: ['game', 'gaming', 'esport', 'lol', 'lien minh', 'lien quan', 'pubg', 'free fire', 'valorant', 'genshin', 'tft', 'steam', 'playstation', 'nintendo'] },
+  { value: 'Gym', terms: ['gym', 'fitness', 'tap gym', 'the thao', 'bong da', 'bong ro', 'cau long', 'tennis', 'boi loi', 'boxing', 'muay thai', 'martial arts', 'taekwondo', 'badminton', 'basketball', 'football'] },
+  { value: 'Yoga', terms: ['yoga', 'thien', 'meditation', 'mindfulness', 'pilates'] },
+  { value: 'Chay bo', terms: ['chay bo', 'running', 'marathon', 'jogging', 'trail running'] },
+  { value: 'Sach', terms: ['sach', 'book', 'doc sach', 'novel', 'tieu thuyet', 'trinh tham', 'light novel', 'self help', 'manga', 'webtoon', 'komik', 'van hoc', 'tho', 'blog'].map(w => w.toLowerCase()) },
+  { value: 'Chup anh', terms: ['chup anh', 'photography', 'photo', 'may anh', 'canon', 'sony', 'nikon', 'chinh sua anh', 'lightroom', 'photoshop', 'film', 'instax'] },
+  { value: 'An uong', terms: ['an uong', 'food', 'foodie', 'nau an', 'am thuc', 'mon ngon', 'buffet', 'lau', 'nuong', 'sushi', 'pizza', 'bbq', 'street food', 'quan nhau', 'bar', 'mixology'] },
+  { value: 'Thu cung', terms: ['thu cung', 'pet', 'cho', 'meo', 'dog', 'cat', 'hamster', 'shiba', 'corgi', 'husky', 'golden'] },
+  { value: 'Nghe thuat', terms: ['nghe thuat', 'art', 've tranh', 'design', 'digital art', 'illustration', 'fashion', 'thoi trang', 'makeup', 'sketch', ' acrylic', 'watercolor'] },
+  { value: 'Startup', terms: ['startup', 'kinh doanh', 'business', 'entrepreneur', 'crypto', 'blockchain', 'nft', 'marketing', 'seo', 'content creator', 'influencer', 'streamer', 'freelance', 'remote'] },
 ];
 
 const CITY_ALIASES = [
-  { value: 'Ho Chi Minh', terms: ['ho chi minh', 'hcm', 'sai gon', 'saigon', 'tphcm', 'tp hcm'] },
-  { value: 'Ha Noi', terms: ['ha noi', 'hanoi'] },
-  { value: 'Da Nang', terms: ['da nang', 'danang'] },
-  { value: 'Can Tho', terms: ['can tho'] },
-  { value: 'Nha Trang', terms: ['nha trang'] },
-  { value: 'Da Lat', terms: ['da lat', 'dalat'] },
+  { value: 'Ho Chi Minh', terms: ['ho chi minh', 'hcm', 'sai gon', 'saigon', 'tphcm', 'tp hcm', 'sg', 'quan 1', 'quan 2', 'quan 3', 'quan 7', 'quan 9', 'thu duc', 'binh thanh', 'go vap', 'tan binh', 'phu nhuan', 'district 1', 'district 2', 'thao dien'] },
+  { value: 'Ha Noi', terms: ['ha noi', 'hanoi', 'hn', 'ba dinh', 'hoan kiem', 'dong da', 'cau giay', 'tay ho', 'nam tu liem', 'bac tu liem', 'hoang mai', 'long bien', 'ha dong'] },
+  { value: 'Da Nang', terms: ['da nang', 'danang', 'hai chau', 'son tra', 'ngu hanh son', 'lien chieu', 'cam le', 'hoa khanh'] },
+  { value: 'Can Tho', terms: ['can tho', 'cai rang', 'binh thuy', 'ninh kieu'] },
+  { value: 'Nha Trang', terms: ['nha trang', 'khanh hoa'] },
+  { value: 'Da Lat', terms: ['da lat', 'dalat', 'lam dong'] },
+  { value: 'Hai Phong', terms: ['hai phong', 'hp'] },
+  { value: 'Bien Hoa', terms: ['bien hoa', 'dong nai'] },
+  { value: 'Vung Tau', terms: ['vung tau', 'brvt', 'ba ria'] },
 ];
 
 const STOPWORDS = new Set([
@@ -60,6 +63,63 @@ const PERSONALITY_ALIASES = [
 const ADULT_ONLY_MATCHMAKER_MESSAGE = 'Để an toàn, ChappAt chỉ gợi ý hồ sơ từ 18 tuổi trở lên. Bạn chọn một khoảng tuổi 18+ nhé.';
 const ADULT_AGE_REPLIES = ['18-25 tuổi', '22-28 tuổi', '25-32 tuổi'];
 
+/* â”€â”€â”€ Production Guards: Rate Limiting + Request Deduplication â”€â”€â”€ */
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 15;
+const RATE_LIMIT_AI_REQUESTS = 10;
+const REQUEST_DEDUP_WINDOW_MS = 8_000;
+
+const requestLog = new Map(); // uid -> [{ timestamp, isAi }]
+const dedupMap = new Map();   // hash -> { timestamp, promise }
+
+function getRequestLog(uid) {
+  const now = Date.now();
+  const log = requestLog.get(uid) || [];
+  const fresh = log.filter((entry) => now - entry.timestamp < RATE_LIMIT_WINDOW_MS);
+  requestLog.set(uid, fresh);
+  return fresh;
+}
+
+function isRateLimited(uid, isAiCall = false) {
+  const fresh = getRequestLog(uid);
+  const limit = isAiCall ? RATE_LIMIT_AI_REQUESTS : RATE_LIMIT_MAX_REQUESTS;
+  return fresh.length >= limit;
+}
+
+function recordRequest(uid, isAiCall = false) {
+  const log = requestLog.get(uid) || [];
+  log.push({ timestamp: Date.now(), isAi: isAiCall });
+  requestLog.set(uid, log);
+}
+
+function makeDedupKey(uid, prompt, excludeIds = []) {
+  const base = `${uid}::${prompt}::${excludeIds.slice(0, 5).join(',')}`;
+  let hash = 0;
+  for (let i = 0; i < base.length; i++) {
+    hash = ((hash << 5) - hash) + base.charCodeAt(i);
+    hash |= 0;
+  }
+  return String(hash);
+}
+
+function getDedupedPromise(key, factory) {
+  const now = Date.now();
+  // Clean expired entries
+  for (const [k, v] of dedupMap.entries()) {
+    if (now - v.timestamp > REQUEST_DEDUP_WINDOW_MS) dedupMap.delete(k);
+  }
+
+  const existing = dedupMap.get(key);
+  if (existing && now - existing.timestamp < REQUEST_DEDUP_WINDOW_MS) {
+    return existing.promise;
+  }
+
+  const promise = factory();
+  dedupMap.set(key, { timestamp: now, promise });
+  return promise;
+}
+
+/* Middleware: rate limit trÆ°á»›c auth */
 router.use(authMiddleware);
 
 router.post('/search', async (req, res) => {
@@ -78,6 +138,34 @@ router.post('/search', async (req, res) => {
         .slice(0, 50)
     );
 
+    /* Production Guard: Rate limiting */
+    if (isRateLimited(uid)) {
+      return res.status(429).json({
+        success: false,
+        code: 'RATE_LIMITED',
+        error: 'Bạn gửi yêu cầu hơi nhanh. Đợi một chút rồi thử lại nhé.',
+      });
+    }
+    recordRequest(uid);
+
+    /* Production Guard: Request deduplication cho cùng prompt trong 8s */
+    const dedupKey = makeDedupKey(uid, prompt, Array.from(excludeIds));
+    const dedupedResult = await getDedupedPromise(dedupKey, async () => {
+      return _processSearch({ uid, prompt, conversation, limit, location, excludeIds, startedAt, res });
+    });
+    return res.json(dedupedResult);
+  } catch (error) {
+    console.error('[AI_MATCHMAKER] Search error:', error);
+    res.status(500).json({
+      success: false,
+      code: 'AI_MATCHMAKER_ERROR',
+      error: 'Could not find matches right now. Please try again.',
+    });
+  }
+});
+
+async function _processSearch({ uid, prompt, conversation, limit, location, excludeIds, startedAt, res }) {
+  try {
     if (prompt.length < 2) {
       return res.status(400).json({
         success: false,
@@ -683,20 +771,29 @@ async function loadCandidates(uid, viewer, intent) {
     }
   };
 
+  // Run parallel queries for better latency
+  const parallelQueries = [];
   if (intent.interests.length > 0) {
-    await tryQuery(
-      usersRef.where('interests', 'array-contains-any', intent.interests.slice(0, 10)).limit(candidateLimit),
-      'interests'
+    parallelQueries.push(
+      tryQuery(
+        usersRef.where('interests', 'array-contains-any', intent.interests.slice(0, 10)).limit(candidateLimit),
+        'interests'
+      )
     );
   }
 
   if (intent.genders.length === 1) {
-    await tryQuery(
-      usersRef.where('gender', '==', intent.genders[0]).limit(candidateLimit),
-      'gender'
+    parallelQueries.push(
+      tryQuery(
+        usersRef.where('gender', '==', intent.genders[0]).limit(candidateLimit),
+        'gender'
+      )
     );
   }
 
+  await Promise.allSettled(parallelQueries);
+
+  // Fallback: general pool if results are too few
   if (byId.size < Math.min(candidateLimit, 80)) {
     await tryQuery(usersRef.limit(candidateLimit), 'general');
   }
@@ -1001,7 +1098,7 @@ function shouldRunMatchSearch(prompt, conversation) {
   if (!text) return false;
   if (hasUnderageDatingRequest(text)) return false;
 
-  const explicitSearchRegex = /\b(tim|kiem|loc|goi y|de xuat|gioi thieu|match|mai moi|ket noi|recommend|suggest|find|search|show)\b/;
+  const explicitSearchRegex = /\b(tim|kiem|loc|goi y|de xuat|gioi thieu|match|mai moi|ket noi|recommend|suggest|find|search|show|kiem ban|kiem nguoi yeu|co ai|ai do|crush|muon hen ho|muon tim hieu|ket ban)\b/;
   const explicitProfileRegex = /\b(ho so|nguoi hop|nguoi phu hop|gu hop|mau nguoi|doi tuong)\b/;
   const directAskRegex = /\b(giup minh|cho minh|xem thu|xem giup|tim thu|goi y thu)\b/;
   const moreResultsRegex = /\b(them|xem them|loc tiep|goi y tiep|nguoi khac|ho so khac|ket qua moi|khac nua|nua di|them nua|more|another|next)\b/;
