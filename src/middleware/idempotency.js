@@ -3,6 +3,25 @@ const { getFirestore, Timestamp } = require('firebase-admin/firestore');
 
 const db = getFirestore();
 
+/**
+ * Recursively strip undefined values from an object.
+ * Firestore throws on undefined values by default.
+ */
+function stripUndefined(obj) {
+  if (obj === null || obj === undefined) return null;
+  if (typeof obj !== 'object' || obj instanceof Date || obj instanceof Timestamp) return obj;
+  if (Array.isArray(obj)) {
+    return obj.map(stripUndefined);
+  }
+  const result = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value !== undefined) {
+      result[key] = stripUndefined(value);
+    }
+  }
+  return result;
+}
+
 function createIdempotencyMiddleware(options = {}) {
   const ttlMs = Number(options.ttlMs || process.env.IDEMPOTENCY_TTL_MS || 24 * 60 * 60 * 1000);
   const lockMs = Number(options.lockMs || process.env.IDEMPOTENCY_LOCK_MS || 60 * 1000);
@@ -54,13 +73,15 @@ function createIdempotencyMiddleware(options = {}) {
       const originalJson = res.json.bind(res);
       res.json = (body) => {
         const statusCode = res.statusCode || 200;
+        // Strip undefined values before saving to Firestore
+        const safeBody = stripUndefined(body);
         if (statusCode < 500) {
           ref.set({
             uid,
             route,
             status: 'completed',
             statusCode,
-            responseBody: body,
+            responseBody: safeBody,
             createdAt: Timestamp.now(),
           }, { merge: true }).catch((err) => {
             console.error('[IDEMPOTENCY] Failed to persist response:', err);

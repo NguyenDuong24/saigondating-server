@@ -222,17 +222,38 @@ async function assertNotBlocked(callerId, receiverId) {
 
 async function assertNoActiveOutgoingCall(uid) {
     const activeStatuses = ['ringing', 'accepted'];
+    const STALE_CALL_AGE_MS = 120 * 1000; // 2 minutes = auto timeout
     const activeCalls = await db.collection('calls')
         .where('callerId', '==', uid)
         .where('status', 'in', activeStatuses)
-        .limit(1)
+        .limit(5)
         .get();
 
-    if (!activeCalls.empty) {
-        const error = new Error('You already have an active call');
-        error.status = 429;
-        error.code = 'ACTIVE_CALL_EXISTS';
-        throw error;
+    const now = Date.now();
+
+    for (const doc of activeCalls.docs) {
+        const data = doc.data() || {};
+        const createdAtMs = asSafeMillis(data.createdAt);
+
+        // Auto-timeout stale ringing calls (>2min old)
+        if (data.status === 'ringing' && createdAtMs > 0 && now - createdAtMs > STALE_CALL_AGE_MS) {
+            console.log(`[VideoSDK] Auto-ending stale ringing call ${doc.id} (${Math.floor((now - createdAtMs) / 1000)}s old)`);
+            await doc.ref.update({
+                status: 'ended',
+                endedAt: Timestamp.now(),
+                endReason: 'stale_auto_timeout',
+                updatedAt: Timestamp.now(),
+            }).catch((err) => console.warn('Failed to auto-timeout stale call:', err));
+            continue; // Skip stale call, allow new one
+        }
+
+        // If call is still active (not stale), block
+        if (data.status === 'ringing' || data.status === 'accepted') {
+            const error = new Error('You already have an active call');
+            error.status = 429;
+            error.code = 'ACTIVE_CALL_EXISTS';
+            throw error;
+        }
     }
 }
 
