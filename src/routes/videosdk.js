@@ -222,7 +222,7 @@ async function assertNotBlocked(callerId, receiverId) {
 
 async function assertNoActiveOutgoingCall(uid) {
     const activeStatuses = ['ringing', 'accepted'];
-    const STALE_RINGING_AGE_MS = 120 * 1000; // 2 minutes = auto timeout
+    const STALE_RINGING_AGE_MS = 45 * 1000; // 45 seconds = auto timeout (reduced from 120s to reduce 429 on retry)
     const STALE_ACCEPTED_AGE_MS = 6 * 60 * 60 * 1000; // Defensive cleanup for calls that never ended.
     const activeCalls = await db.collection('calls')
         .where('callerId', '==', uid)
@@ -453,11 +453,20 @@ function sanitizeMetadata(metadata) {
 function sendError(res, error, fallbackCode, fallbackMessage) {
     const body = {
         success: false,
-        code: error.code || fallbackCode,
-        error: error.status ? error.message : fallbackMessage,
+        code: error.code || fallbackCode || 'UNKNOWN_ERROR',
+        error: (error.status ? error.message : null) || fallbackMessage || 'Internal server error',
     };
-    if (error.details !== undefined) {
-        body.details = error.details;
+    if (error.details !== undefined && error.details !== null) {
+        // Strip any undefined values from details before sending
+        const cleanDetails = {};
+        for (const [key, value] of Object.entries(error.details || {})) {
+            if (value !== undefined) {
+                cleanDetails[key] = value === null ? null : value;
+            }
+        }
+        if (Object.keys(cleanDetails).length > 0) {
+            body.details = cleanDetails;
+        }
     }
     return res.status(error.status || 500).json(body);
 }

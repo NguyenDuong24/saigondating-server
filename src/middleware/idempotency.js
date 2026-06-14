@@ -74,25 +74,34 @@ function createIdempotencyMiddleware(options = {}) {
         const statusCode = res.statusCode || 200;
         // Strip undefined values before saving to Firestore
         const safeBody = stripUndefined(body);
-        if (statusCode < 500) {
-          ref.set({
-            uid,
-            route,
-            status: 'completed',
-            statusCode,
-            responseBody: safeBody,
-            createdAt: Timestamp.now(),
-          }, { merge: true }).catch((err) => {
-            console.error('[IDEMPOTENCY] Failed to persist response:', err);
-          });
-        } else {
-          ref.set({
-            uid,
-            route,
-            status: 'failed',
-            statusCode,
-            createdAt: Timestamp.now(),
-          }, { merge: true }).catch(() => {});
+        const isSuccess = statusCode < 500;
+        try {
+          if (isSuccess) {
+            ref.set({
+              uid,
+              route,
+              status: 'completed',
+              statusCode,
+              responseBody: safeBody,
+              createdAt: Timestamp.now(),
+            }, { merge: true }).catch((err) => {
+              console.error('[IDEMPOTENCY] Failed to persist completed response:', err);
+            });
+          } else {
+            ref.set({
+              uid,
+              route,
+              status: 'failed',
+              statusCode,
+              createdAt: Timestamp.now(),
+            }, { merge: true }).catch((err) => {
+              console.error('[IDEMPOTENCY] Failed to persist failed response:', err);
+            });
+          }
+        } catch (syncError) {
+          // Firestore may throw synchronously during validation (e.g., undefined values)
+          // Don't block the response — log and continue
+          console.error('[IDEMPOTENCY] Synchronous Firestore error:', syncError.message);
         }
         return originalJson(body);
       };
