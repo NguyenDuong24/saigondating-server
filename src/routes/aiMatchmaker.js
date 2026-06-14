@@ -336,7 +336,7 @@ async function _processSearch({ uid, prompt, conversation, limit, location, excl
       error: 'Could not find matches right now. Please try again.',
     });
   }
-});
+}
 
 async function analyzePrompt(prompt, viewer) {
   const fallbackIntent = buildHeuristicIntent(prompt);
