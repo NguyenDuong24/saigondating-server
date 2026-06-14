@@ -472,6 +472,115 @@ function sendError(res, error, fallbackCode, fallbackMessage) {
 }
 
 /**
+ * Send a push notification to the receiver when a call is created.
+ * Uses Expo Push API directly from the server (avoids CORS & wrong-platform issues).
+ * Non-blocking: errors are logged but do not fail the call creation.
+ */
+async function sendCallPushNotification({ callerId, receiverId, callId, meetingId, callType }) {
+    try {
+        // Fetch caller info and receiver push token in parallel
+        const [callerSnap, receiverSnap] = await Promise.all([
+            db.collection('users').doc(callerId).get(),
+            db.collection('users').doc(receiverId).get(),
+        ]);
+
+        if (!receiverSnap.exists) {
+            console.warn('[push] Receiver doc not found, skipping push:', receiverId);
+            return;
+        }
+
+        const callerData = callerSnap.exists ? callerSnap.data() || {} : {};
+        const receiverData = receiverSnap.data() || {};
+
+        // Resolve the best available Expo push token
+        // Priority: currentExpoPushToken > expoPushToken > newest in expoPushTokens map
+        let expoPushToken = receiverData.currentExpoPushToken || receiverData.expoPushToken || null;
+
+        if (!expoPushToken && receiverData.expoPushTokens && typeof receiverData.expoPushTokens === 'object') {
+            // Pick the most recently updated token from the map
+            const tokenEntries = Object.values(receiverData.expoPushTokens)
+                .filter(entry => entry && typeof entry.token === 'string')
+                .sort((a, b) => {
+                    const ta = a.timestamp || '';
+                    const tb = b.timestamp || '';
+                    return tb.localeCompare(ta);
+                });
+            if (tokenEntries.length > 0) {
+                expoPushToken = tokenEntries[0].token;
+            }
+        }
+
+        if (!expoPushToken) {
+            console.warn('[push] No Expo push token found for receiver:', receiverId);
+            return;
+        }
+
+        // Validate Expo push token format
+        if (!expoPushToken.startsWith('ExponentPushToken[') && !expoPushToken.startsWith('ExpoPushToken[')) {
+            console.warn('[push] Invalid Expo push token format:', expoPushToken.slice(0, 30));
+            return;
+        }
+
+        const callerName = callerData.username || callerData.displayName || 'Unknown';
+        const callTypeLabel = callType === 'video' ? 'Video call' : 'Voice call';
+
+        const message = {
+            to: expoPushToken,
+            title: callerName,
+            body: callTypeLabel + ' incoming...',
+            data: {
+                type: 'call',
+                callId,
+                callerId,
+                meetingId,
+                callType,
+                senderId: callerId,
+                senderName: callerName,
+                senderAvatar: callerData.profileUrl || callerData.photoURL || null,
+            },
+            sound: 'default',
+            badge: 1,
+            priority: 'high',
+            channelId: 'calls',
+            ttl: 45, // Expire after ring timeout (45s)
+            expiration: Math.floor(Date.now() / 1000) + 45,
+            // Android-specific fields
+            android: {
+                channelId: 'calls',
+                priority: 'max',
+                sound: 'default',
+                vibrate: [0, 1000, 500, 1000],
+            },
+        };
+
+        const response = await fetch('https://exp.host/--/api/v2/push/send', {
+            method: 'POST',
+            headers: {
+                Accept: 'application/json',
+                'Accept-encoding': 'gzip, deflate',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(message),
+        });
+
+        const result = await response.json();
+
+        // Expo Push API v2 returns: { data: { id, status } } or { data: [{ id, status }] }
+        const ticket = Array.isArray(result.data) ? result.data[0] : result.data;
+        if (ticket && ticket.status === 'ok') {
+            console.log('[push] ✅ Call push notification sent to', receiverId, '| ticket:', ticket.id);
+        } else if (ticket && ticket.status === 'error') {
+            console.warn('[push] ⚠️ Expo push error:', ticket.message, ticket.details);
+        } else {
+            console.warn('[push] Unexpected Expo push response:', JSON.stringify(result).slice(0, 300));
+        }
+    } catch (err) {
+        // Non-blocking: push failure must not fail call creation
+        console.error('[push] ❌ Failed to send call push notification:', err.message);
+    }
+}
+
+/**
  * GET /videosdk/diag
  * Auth-protected diagnostic: tests if VideoSDK keys are configured and can create a room.
  * Use this to debug 502 errors from VideoSDK.
@@ -637,6 +746,15 @@ router.post('/rooms', roomCreateLimiter, idempotency, async (req, res) => {
                 metadata,
             });
             callId = callRef.id;
+
+            // Send push notification to receiver (non-blocking - don't await so it won't delay the response)
+            sendCallPushNotification({
+                callerId: uid,
+                receiverId,
+                callId,
+                meetingId: roomId,
+                callType,
+            }).catch((err) => console.error('[push] Unhandled push error:', err.message));
         }
 
         res.json({
