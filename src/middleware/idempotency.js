@@ -15,9 +15,8 @@ function stripUndefined(obj) {
   }
   const result = {};
   for (const [key, value] of Object.entries(obj)) {
-    if (value !== undefined) {
-      result[key] = stripUndefined(value);
-    }
+    const safeValue = stripUndefined(value);
+    if (safeValue !== undefined) result[key] = safeValue;
   }
   return result;
 }

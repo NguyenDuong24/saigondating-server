@@ -222,7 +222,8 @@ async function assertNotBlocked(callerId, receiverId) {
 
 async function assertNoActiveOutgoingCall(uid) {
     const activeStatuses = ['ringing', 'accepted'];
-    const STALE_CALL_AGE_MS = 120 * 1000; // 2 minutes = auto timeout
+    const STALE_RINGING_AGE_MS = 120 * 1000; // 2 minutes = auto timeout
+    const STALE_ACCEPTED_AGE_MS = 6 * 60 * 60 * 1000; // Defensive cleanup for calls that never ended.
     const activeCalls = await db.collection('calls')
         .where('callerId', '==', uid)
         .where('status', 'in', activeStatuses)
@@ -233,11 +234,12 @@ async function assertNoActiveOutgoingCall(uid) {
 
     for (const doc of activeCalls.docs) {
         const data = doc.data() || {};
-        const createdAtMs = asSafeMillis(data.createdAt);
+        const createdAtMs = asSafeMillis(data.createdAt) || asSafeMillis(data.updatedAt);
+        const ageMs = createdAtMs > 0 ? now - createdAtMs : 0;
 
         // Auto-timeout stale ringing calls (>2min old)
-        if (data.status === 'ringing' && createdAtMs > 0 && now - createdAtMs > STALE_CALL_AGE_MS) {
-            console.log(`[VideoSDK] Auto-ending stale ringing call ${doc.id} (${Math.floor((now - createdAtMs) / 1000)}s old)`);
+        if (data.status === 'ringing' && ageMs > STALE_RINGING_AGE_MS) {
+            console.log(`[VideoSDK] Auto-ending stale ringing call ${doc.id} (${Math.floor(ageMs / 1000)}s old)`);
             await doc.ref.update({
                 status: 'ended',
                 endedAt: Timestamp.now(),
@@ -245,6 +247,17 @@ async function assertNoActiveOutgoingCall(uid) {
                 updatedAt: Timestamp.now(),
             }).catch((err) => console.warn('Failed to auto-timeout stale call:', err));
             continue; // Skip stale call, allow new one
+        }
+
+        if (data.status === 'accepted' && ageMs > STALE_ACCEPTED_AGE_MS) {
+            console.log(`[VideoSDK] Auto-ending stale accepted call ${doc.id} (${Math.floor(ageMs / 1000)}s old)`);
+            await doc.ref.update({
+                status: 'ended',
+                endedAt: Timestamp.now(),
+                endReason: 'stale_accepted_auto_timeout',
+                updatedAt: Timestamp.now(),
+            }).catch((err) => console.warn('Failed to auto-timeout stale accepted call:', err));
+            continue;
         }
 
         // If call is still active (not stale), block
@@ -437,6 +450,18 @@ function sanitizeMetadata(metadata) {
     return safe;
 }
 
+function sendError(res, error, fallbackCode, fallbackMessage) {
+    const body = {
+        success: false,
+        code: error.code || fallbackCode,
+        error: error.status ? error.message : fallbackMessage,
+    };
+    if (error.details !== undefined) {
+        body.details = error.details;
+    }
+    return res.status(error.status || 500).json(body);
+}
+
 /**
  * GET /videosdk/diag
  * Auth-protected diagnostic: tests if VideoSDK keys are configured and can create a room.
@@ -564,28 +589,19 @@ router.post('/rooms', roomCreateLimiter, idempotency, async (req, res) => {
             }
         }
 
-        // ⚡ PARALLEL: Chạy tất cả pre-flight checks và VideoSDK room creation cùng lúc.
-        // Các check là độc lập, không phụ thuộc nhau.
-        const preflightChecks = [];
+        // Run preflight checks before creating the upstream VideoSDK room.
         if (receiverId) {
-            preflightChecks.push(
+            await Promise.all([
                 assertReceiverExists(receiverId),
                 assertNotBlocked(uid, receiverId),
                 assertNoActiveOutgoingCall(uid),
-            );
+            ]);
         }
-        preflightChecks.push(getUserTier(uid));
-        preflightChecks.push(createVideoSdkRoom(uid));
 
-        const results = await Promise.all(preflightChecks);
-        // results: [receiverExists (void), notBlocked (void), noActiveCall (void), tier (string), roomId (string)]
-        // nếu không có receiverId thì: [tier (string), roomId (string)]
-        const tier = receiverId ? results[results.length - 2] : results[results.length - 2];
-        const roomId = results[results.length - 1];
+        const tier = await getUserTier(uid);
+        const { maxDurationForThisCall: maxDurationSeconds } = await reserveDailyQuota(uid, tier, receiverId ? callType : 'room');
+        const roomId = await createVideoSdkRoom(uid);
         const joinToken = signVideoSdkToken(uid, { roomId });
-
-        // Now that we have a real room, check limits and reserve a call slot
-        const { maxDurationForThisCall: maxDurationSeconds, remainingBudget } = await reserveDailyQuota(uid, tier, receiverId ? callType : 'room');
 
         await rememberVideoRoom(roomId, uid, receiverId, tier, maxDurationSeconds, metadata);
 
@@ -634,12 +650,7 @@ router.post('/rooms', roomCreateLimiter, idempotency, async (req, res) => {
             details: error.details,
             stack: error.stack?.split('\n').slice(0, 4).join(' | '),
         });
-        res.status(error.status || 500).json({
-            success: false,
-            code: error.code || 'VIDEOSDK_ROOM_FAILED',
-            error: error.status ? error.message : 'Failed to create VideoSDK room',
-            details: error.details,
-        });
+        return sendError(res, error, 'VIDEOSDK_ROOM_FAILED', 'Failed to create VideoSDK room');
     }
 });
 
