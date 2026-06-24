@@ -151,16 +151,25 @@ router.post('/search', async (req, res) => {
     /* Production Guard: Request deduplication cho cùng prompt trong 8s */
     const dedupKey = makeDedupKey(uid, prompt, Array.from(excludeIds));
     const dedupedResult = await getDedupedPromise(dedupKey, async () => {
-      return _processSearch({ uid, prompt, conversation, limit, location, excludeIds, startedAt, res });
+      // _processSearch sends the response itself. Return null to prevent double-send.
+      await _processSearch({ uid, prompt, conversation, limit, location, excludeIds, startedAt, res });
+      return null;
     });
-    return res.json(dedupedResult);
+
+    // If dedupedResult is null, _processSearch already sent the response via res.
+    // If dedupedResult is non-null (from a cached deduped promise), send it now.
+    if (dedupedResult !== null) {
+      res.json(dedupedResult);
+    }
   } catch (error) {
     console.error('[AI_MATCHMAKER] Search error:', error);
-    res.status(500).json({
-      success: false,
-      code: 'AI_MATCHMAKER_ERROR',
-      error: 'Could not find matches right now. Please try again.',
-    });
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        code: 'AI_MATCHMAKER_ERROR',
+        error: 'Could not find matches right now. Please try again.',
+      });
+    }
   }
 });
 
@@ -383,6 +392,10 @@ async function postAiChatCompletion({ baseUrl, apiKey, timeoutMs, payload }) {
 }
 
 function getAiBaseUrl() {
+  // AI_BASE_URL takes highest priority when explicitly set
+  if (process.env.AI_BASE_URL) {
+    return process.env.AI_BASE_URL.replace(/\/$/, '');
+  }
   if (process.env.DEEPSEEK_API_KEY) {
     return (process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1').replace(/\/$/, '');
   }
@@ -411,7 +424,8 @@ function getAiModelCandidates(primaryModel) {
 }
 
 function shouldTryNextAiModel(status) {
-  return [408, 429, 500, 502, 503, 504].includes(Number(status));
+  // 404 = model not found on provider (e.g. OpenRouter model name sent to DeepSeek)
+  return [404, 408, 429, 500, 502, 503, 504].includes(Number(status));
 }
 
 function hasAiTextProvider() {
