@@ -1,10 +1,11 @@
 /**
  * AI Matchmaker Routes
- * ChatGPT-like conversation + Matchmaker search.
+ * ChatGPT-like conversation + AI-powered Matchmaker search.
+ * Uses OpenAI-compatible function/tool calling for intent detection.
  */
 
 const express = require('express');
-const { getFirestore, Timestamp } = require('firebase-admin/firestore');
+const { getFirestore } = require('firebase-admin/firestore');
 const authMiddleware = require('../middleware/auth');
 
 const router = express.Router();
@@ -48,6 +49,97 @@ function isRateLimited(uid) {
   return log.length >= RATE_LIMIT_MAX_REQUESTS;
 }
 
+// ============================================================
+// TOOL DEFINITION — AI function calling
+// ============================================================
+
+const SEARCH_PROFILES_TOOL = {
+  type: 'function',
+  function: {
+    name: 'search_profiles',
+    description:
+      'Tìm kiếm hồ sơ người dùng trong database ChappAt. ' +
+      'CHỈ gọi function này khi user RÕ RÀNG muốn tìm người để hẹn hò / làm quen / kết bạn ' +
+      'VÀ đã cung cấp ÍT NHẤT 2 tiêu chí cụ thể (ví dụ: giới tính + tuổi, giới tính + thành phố, giới tính + sở thích). ' +
+      'Nếu user chỉ có 1 tiêu chí hoặc tiêu chí mơ hồ, ĐỪNG gọi tool — thay vào đó hãy hỏi thêm để làm rõ. ' +
+      'Ví dụ: "tìm bạn gái" → hỏi thêm tuổi, thành phố. "tìm bạn nữ 22-28 tuổi ở HCM thích cafe" → gọi tool ngay.',
+    parameters: {
+      type: 'object',
+      properties: {
+        gender: {
+          type: 'string',
+          enum: ['male', 'female'],
+          description: 'Giới tính muốn tìm: male (nam) hoặc female (nữ)'
+        },
+        minAge: {
+          type: 'integer',
+          minimum: 18,
+          maximum: 80,
+          description: 'Tuổi tối thiểu (mặc định 18 nếu không rõ)'
+        },
+        maxAge: {
+          type: 'integer',
+          minimum: 18,
+          maximum: 80,
+          description: 'Tuổi tối đa (mặc định 50 nếu không rõ)'
+        },
+        interests: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Sở thích muốn tìm: Cafe, Du lich, Am nhac, Phim, Game, Gym, Sach, An uong, Thu cung'
+        },
+        city: {
+          type: 'string',
+          description: 'Thành phố: Ho Chi Minh, Ha Noi, Da Nang'
+        },
+        radiusKm: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 200,
+          description: 'Khoảng cách tối đa tính bằng km (mặc định 30km nếu không rõ)'
+        }
+      }
+    }
+  }
+};
+
+// ============================================================
+// AI SYSTEM PROMPT
+// ============================================================
+
+function buildSystemPrompt(viewer) {
+  const viewerName = viewer?.displayName || viewer?.username || 'bạn';
+  return [
+    `Bạn là trợ lý AI thông minh, duyên dáng của ChappAt — app hẹn hò dành cho người Việt.`,
+    ``,
+    `TÍNH CÁCH:`,
+    `- Trò chuyện tự nhiên, hài hước, ấm áp như bạn thân nhắn tin`,
+    `- Am hiểu đa dạng chủ đề: khoa học, đời sống, tâm sự, tình yêu, công nghệ, giải trí, triết học...`,
+    `- Trả lời NGẮN GỌN (1-4 câu), súc tích, dễ hiểu`,
+    `- Dùng tiếng Việt tự nhiên, thêm chút tiếng Anh / emoji cho vui nếu phù hợp`,
+    `- Gọi user là "${viewerName}" nếu biết tên`,
+    ``,
+    `KHI NÀO TÌM KIẾM HỒ SƠ:`,
+    `- CHỈ gọi function search_profiles khi user RÕ RÀNG muốn tìm người để hẹn hò / làm quen`,
+    `- PHẢI có ÍT NHẤT 2 tiêu chí rõ ràng (giới tính + tuổi/thành phố/sở thích)`,
+    `- Nếu user nói mơ hồ ("tìm bạn gái", "có ai không") → ĐỪNG gọi tool, hãy hỏi thêm tự nhiên:`,
+    `  "Bạn muốn tìm ở độ tuổi nào, thành phố nào nè? 😊"`,
+    `- Nếu user cung cấp đủ thông tin ("tìm bạn nữ 22-28 tuổi ở HCM thích cafe") → GỌI TOOL NGAY`,
+    `- Khi gọi tool, luôn để city và interests ở dạng tiếng Việt chuẩn:`,
+    `  Ho Chi Minh | Ha Noi | Da Nang`,
+    `  Cafe | Du lich | Am nhac | Phim | Game | Gym | Sach | An uong | Thu cung`,
+    ``,
+    `QUAN TRỌNG:`,
+    `- Không giả vờ đã tìm thấy hồ sơ — việc đó do hệ thống backend làm`,
+    `- Chỉ trò chuyện hoặc gọi tool, không tự bịa ra kết quả tìm kiếm`,
+    `- Nếu user muốn tâm sự, hỏi kiến thức, bàn luận — cứ tự nhiên trả lời, không cần liên quan hẹn hò`
+  ].join('\n');
+}
+
+// ============================================================
+// ROUTE HANDLER
+// ============================================================
+
 router.use(authMiddleware);
 
 router.post('/search', async (req, res) => {
@@ -75,33 +167,39 @@ router.post('/search', async (req, res) => {
       return res.json({ mode: 'chat', assistantMessage: ADULT_ONLY_MATCHMAKER_MESSAGE, suggestedReplies: ['18-25 tuổi', '22-28 tuổi'], matches: [] });
     }
 
-    // 2. Kiểm tra có muốn tìm người không
-    const shouldSearch = shouldRunMatchSearch(prompt, conversation);
+    // 2. Call AI with tool definition — AI decides: chat or search
+    const aiResult = await callAiWithTools({ conversation, prompt, viewer });
 
-    if (!shouldSearch) {
-      // CHAT MODE CHATGPT
-      const assistantMessage = await composeAiChatMessage({ conversation, prompt, viewer });
-      return res.json({ mode: 'chat', assistantMessage, suggestedReplies: [], matches: [] });
+    // 3. Check if AI called the search tool
+    const searchToolCall = aiResult.toolCalls?.find(tc => tc.function?.name === 'search_profiles');
+
+    if (searchToolCall) {
+      // AI wants to search — parse criteria and query DB
+      const criteria = parseAiCriteria(searchToolCall.function.arguments);
+      const intent = criteriaToIntent(criteria);
+
+      const candidates = (await loadCandidates(uid, viewer, intent))
+        .filter(c => !excludeIds.has(String(c.id || c.uid || '').trim()));
+
+      const ranked = rankCandidates(candidates, viewer, intent, prompt, location).slice(0, limit);
+      const matches = ranked.map(({ user, percent, reasons, distanceKm }) => ({
+        ...toPublicUser(user), matchPercent: percent, matchScore: percent, matchReasons: reasons, distanceKm
+      }));
+
+      // Generate a friendly intro message for the results
+      const assistantMessage = await composeResultIntro({ conversation, viewer, matches });
+
+      return res.json({
+        mode: 'results',
+        assistantMessage,
+        suggestedReplies: matches.length > 0 ? ['Tìm thêm người khác', 'Ẩn kết quả'] : ['Thử tiêu chí khác'],
+        matches
+      });
     }
 
-    // SEARCH MODE
-    const rawIntent = buildHeuristicIntent(prompt);
-    const candidates = (await loadCandidates(uid, viewer, rawIntent))
-      .filter(c => !excludeIds.has(String(c.id || c.uid || '').trim()));
-      
-    const ranked = rankCandidates(candidates, viewer, rawIntent, prompt, location).slice(0, limit);
-    const matches = ranked.map(({ user, percent, reasons, distanceKm }) => ({
-      ...toPublicUser(user), matchPercent: percent, matchScore: percent, matchReasons: reasons, distanceKm
-    }));
-
-    const assistantMessage = await composeAiResultMessage({ conversation, prompt, viewer, matches });
-    
-    return res.json({
-      mode: 'results',
-      assistantMessage,
-      suggestedReplies: matches.length > 0 ? ['Tìm thêm người khác', 'Ẩn kết quả'] : [],
-      matches
-    });
+    // 4. Chat mode — AI responded with text, no tool call
+    const assistantMessage = aiResult.content || 'Xin lỗi, mình chưa hiểu ý bạn lắm. Bạn nói lại nhé!';
+    return res.json({ mode: 'chat', assistantMessage, suggestedReplies: [], matches: [] });
 
   } catch (error) {
     console.error('[AI_MATCHMAKER] Error:', error);
@@ -109,54 +207,102 @@ router.post('/search', async (req, res) => {
   }
 });
 
-// --- AI Text Generation ---
-async function composeAiChatMessage({ conversation, prompt, viewer }) {
-  const fallback = "Xin lỗi, hệ thống kết nối tới AI đang hơi trục trặc. Bạn nhắn lại thử nhé!";
+// ============================================================
+// AI FUNCTIONS
+// ============================================================
+
+/**
+ * Call AI with tool definition for intent detection.
+ * Returns { content: string, toolCalls: array | null }
+ * Falls back to heuristics if tool calling fails completely.
+ */
+async function callAiWithTools({ conversation, prompt, viewer }) {
+  const fallbackContent = 'Xin lỗi, hệ thống kết nối tới AI đang hơi trục trặc. Bạn nhắn lại thử nhé!';
 
   try {
-    const recentMessages = normalizeConversation(conversation).slice(-6).map(item => ({
+    const recentMessages = normalizeConversation(conversation).slice(-8).map(item => ({
       role: item.role,
       content: item.text.slice(0, 500)
     }));
 
     const response = await postAiChatCompletionWithFallback({
-      timeoutMs: 15000,
+      timeoutMs: 20000,
       payload: {
         temperature: 0.85,
-        max_tokens: 300,
+        max_tokens: 400,
+        tools: [SEARCH_PROFILES_TOOL],
+        tool_choice: 'auto',
         messages: [
-          {
-            role: 'system',
-            content: `Bạn là một trợ lý AI ảo thông minh, duyên dáng, hài hước và hiểu biết.
-            Bạn đang hoạt động trong app hẹn hò ChappAt.
-            Bạn CÓ THỂ trò chuyện tự nhiên về BẤT KỲ chủ đề nào (khoa học, đời sống, tâm sự, triết lý, công nghệ) giống hệt ChatGPT.
-            Hãy trả lời câu hỏi của người dùng một cách chân thành, thông minh và hữu ích.
-            Không cần phải lúc nào cũng nói về hẹn hò. Chỉ khi người dùng muốn tìm người, bạn mới đóng vai trò Matchmaker.
-            Trả lời ngắn gọn, tự nhiên, giống như nhắn tin với bạn bè.`
-          },
+          { role: 'system', content: buildSystemPrompt(viewer) },
           ...recentMessages,
           { role: 'user', content: prompt }
         ]
       }
     });
 
-    if (response.ok) {
-      const data = await response.json();
-      const content = String(data?.choices?.[0]?.message?.content || '').trim();
-      return content || fallback;
-    } else {
-      const errBody = await response.text();
-      console.error('[AI_MATCHMAKER] AI API Error:', response.status, errBody);
-      return fallback;
+    if (!response.ok) {
+      // AI API failed — fall back to heuristic intent detection
+      console.warn('[AI_MATCHMAKER] AI API failed, falling back to heuristics');
+      return fallbackToHeuristics({ conversation, prompt });
     }
+
+    const data = await response.json();
+    const message = data?.choices?.[0]?.message;
+
+    if (!message) {
+      return { content: fallbackContent, toolCalls: null };
+    }
+
+    const content = String(message.content || '').trim();
+    const toolCalls = message.tool_calls || null;
+
+    // If AI called a tool, use it; otherwise return chat content
+    if (toolCalls && toolCalls.length > 0) {
+      return { content: content || null, toolCalls };
+    }
+
+    // Pure chat — but if content is empty, fall back to heuristics
+    if (!content) {
+      return fallbackToHeuristics({ conversation, prompt });
+    }
+
+    return { content, toolCalls: null };
+
   } catch (error) {
-    console.error('[AI_MATCHMAKER] Chat reply failed:', error.message);
-    return fallback;
+    console.error('[AI_MATCHMAKER] callAiWithTools failed:', error.message);
+    return fallbackToHeuristics({ conversation, prompt });
   }
 }
 
-async function composeAiResultMessage({ conversation, prompt, viewer, matches }) {
-  const fallback = matches.length > 0 ? `Mình tìm được ${matches.length} hồ sơ khá hợp gu. Bạn xem thử nhé!` : 'Mình chưa thấy ai thật sự hợp, thử đổi tiêu chí nhé.';
+/**
+ * Fallback: use regex heuristics when tool calling fails.
+ */
+function fallbackToHeuristics({ conversation, prompt }) {
+  const shouldSearch = shouldRunMatchSearch(prompt, conversation);
+  if (shouldSearch) {
+    const intent = buildHeuristicIntent(prompt);
+    // Pack heuristic intent into the tool-call format so the route handler can process it uniformly
+    const args = {
+      gender: intent.genders[0] || null,
+      minAge: intent.minAge,
+      maxAge: intent.maxAge,
+      interests: intent.interests,
+      city: intent.cities[0] || null,
+      radiusKm: intent.radiusKm,
+      _heuristic: true
+    };
+    return { content: null, toolCalls: [{ function: { name: 'search_profiles', arguments: JSON.stringify(args) } }] };
+  }
+  return { content: 'Xin lỗi, hệ thống đang bận. Bạn thử lại nhé!', toolCalls: null };
+}
+
+/**
+ * Generate a friendly intro message for search results.
+ */
+async function composeResultIntro({ conversation, matches }) {
+  const fallback = matches.length > 0
+    ? `Mình tìm được ${matches.length} hồ sơ khá hợp gu. Bạn xem thử nhé!`
+    : 'Mình chưa thấy ai thật sự hợp, thử đổi tiêu chí nhé.';
 
   try {
     const recentMessages = normalizeConversation(conversation).slice(-4).map(item => ({
@@ -168,16 +314,17 @@ async function composeAiResultMessage({ conversation, prompt, viewer, matches })
       payload: {
         temperature: 0.7, max_tokens: 150,
         messages: [
-          { role: 'system', content: 'Bạn là AI Matchmaker. Bạn vừa tìm được hồ sơ cho user. Hãy giới thiệu nhẹ nhàng, tự nhiên trong 1-2 câu.' },
+          { role: 'system', content: 'Bạn là AI Matchmaker của ChappAt. Bạn vừa tìm được hồ sơ cho user. Hãy giới thiệu nhẹ nhàng, tự nhiên trong 1-2 câu. Không bịa thông tin.' },
           ...recentMessages,
-          { role: 'user', content: JSON.stringify({ task: 'introduce_matches', count: matches.length, topReasons: [...new Set(matches.flatMap(m => m.matchReasons))].slice(0, 3) }) }
+          { role: 'user', content: JSON.stringify({ task: 'introduce_matches', count: matches.length, topReasons: [...new Set(matches.flatMap(m => m.matchReasons || []))].slice(0, 3) }) }
         ]
       }
     });
 
     if (response.ok) {
       const data = await response.json();
-      return String(data?.choices?.[0]?.message?.content || '').trim() || fallback;
+      const content = String(data?.choices?.[0]?.message?.content || '').trim();
+      return content || fallback;
     }
     return fallback;
   } catch (error) {
@@ -185,10 +332,71 @@ async function composeAiResultMessage({ conversation, prompt, viewer, matches })
   }
 }
 
+// ============================================================
+// CRITERIA PARSING — AI tool call → internal intent format
+// ============================================================
+
+/**
+ * Parse and validate AI tool call arguments.
+ */
+function parseAiCriteria(args) {
+  try {
+    const parsed = typeof args === 'string' ? JSON.parse(args) : args;
+    return {
+      gender: parsed.gender || null,
+      minAge: Number.isFinite(parsed.minAge) ? Math.max(18, parsed.minAge) : null,
+      maxAge: Number.isFinite(parsed.maxAge) ? Math.min(80, parsed.maxAge) : null,
+      interests: normalizeStringArray(parsed.interests),
+      city: parsed.city || null,
+      radiusKm: Number.isFinite(parsed.radiusKm) ? parsed.radiusKm : null,
+      _heuristic: parsed._heuristic || false
+    };
+  } catch (e) {
+    console.warn('[AI_MATCHMAKER] Failed to parse AI criteria:', e.message);
+    return { gender: null, minAge: null, maxAge: null, interests: [], city: null, radiusKm: null, _heuristic: false };
+  }
+}
+
+/**
+ * Map AI criteria to the internal intent format expected by loadCandidates / rankCandidates.
+ */
+function criteriaToIntent(criteria) {
+  const genders = criteria.gender ? [criteria.gender] : [];
+
+  // Match AI interests to known INTEREST_ALIASES
+  const aiInterests = criteria.interests.map(normalize);
+  const matchedInterests = INTEREST_ALIASES
+    .filter(e => aiInterests.some(ai => e.terms.some(t => normalize(t) === ai || normalize(t).includes(ai) || ai.includes(normalize(t)))))
+    .map(e => e.value);
+
+  // If AI returned interests that don't match aliases, use them raw
+  const unmatched = criteria.interests.filter((_, i) => {
+    const ai = aiInterests[i];
+    return !INTEREST_ALIASES.some(e => e.terms.some(t => normalize(t) === ai || normalize(t).includes(ai) || ai.includes(normalize(t))));
+  });
+  const interests = [...new Set([...matchedInterests, ...unmatched])];
+
+  // Match AI city to known CITY_ALIASES
+  const aiCity = normalize(criteria.city || '');
+  const matchedCity = CITY_ALIASES.find(e => e.terms.some(t => aiCity.includes(normalize(t)) || normalize(t).includes(aiCity)));
+  const cities = matchedCity ? [matchedCity.value] : (criteria.city ? [criteria.city] : []);
+
+  return {
+    genders,
+    minAge: criteria.minAge,
+    maxAge: criteria.maxAge,
+    interests,
+    cities,
+    radiusKm: criteria.radiusKm
+  };
+}
+
+// ============================================================
+// AI PROVIDER FUNCTIONS
+// ============================================================
+
 /**
  * Build a prioritized list of AI provider configs from env vars.
- * Each entry: { label, baseUrl, apiKey, model }
- * The caller tries them in order, falling back on 401/403/auth failures.
  */
 function buildAiProviderList() {
   const list = [];
@@ -226,7 +434,6 @@ function buildAiProviderList() {
 /**
  * Post a chat completion, trying each provider in order.
  * Falls back to the next provider on 401/403/auth errors.
- * Returns the first successful response, or the last failed response.
  */
 async function postAiChatCompletionWithFallback({ timeoutMs, payload }) {
   const providers = buildAiProviderList();
@@ -263,60 +470,39 @@ async function postAiChatCompletionWithFallback({ timeoutMs, payload }) {
 
       clearTimeout(timeout);
 
-      // If successful or non-auth error, return immediately
       if (response.ok || (response.status !== 401 && response.status !== 403)) {
         return response;
       }
 
-      // Auth error – log and try next provider
       const errBody = await response.text();
       console.error(`[AI_MATCHMAKER] ${provider.label} API Error: ${response.status} ${errBody}`);
       lastResponse = response;
-      // continue to next provider
     } catch (error) {
       clearTimeout(timeout);
       console.error(`[AI_MATCHMAKER] ${provider.label} request failed:`, error.message);
       lastResponse = { ok: false, status: 0, _error: error.message };
-      // continue to next provider
     }
   }
 
-  // All providers failed
   return lastResponse || { ok: false, status: 0 };
 }
 
-// Legacy wrappers kept for backward compatibility
-async function postAiChatCompletion({ baseUrl, apiKey, timeoutMs, payload }) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST', signal: controller.signal,
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', ...(baseUrl.includes('openrouter.ai') ? { 'HTTP-Referer': process.env.AI_HTTP_REFERER || 'https://chappat.com', 'X-Title': process.env.AI_APP_NAME || 'ChappAt' } : {}) },
-    body: JSON.stringify(payload)
-  }).finally(() => clearTimeout(timeout));
-}
+// ============================================================
+// HEURISTIC FALLBACKS (regex-based)
+// ============================================================
 
-function getAiBaseUrl() {
-  if (process.env.AI_BASE_URL) return process.env.AI_BASE_URL.replace(/\/$/, '');
-  if (process.env.DEEPSEEK_API_KEY) return (process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1').replace(/\/$/, '');
-  if (process.env.OPENROUTER_API_KEY) return 'https://openrouter.ai/api/v1';
-  if (process.env.OPENAI_API_KEY) return 'https://api.openai.com/v1';
-  return '';
-}
-
-// --- Heuristics & DB ---
 function shouldRunMatchSearch(prompt, conversation) {
   const text = normalize(prompt);
   if (!text || hasUnderageDatingRequest(text)) return false;
 
-  const explicitSearchRegex = /\b(tim|kiem|loc|goi y|de xuat|gioi thieu|match|mai moi|ket noi|recommend|suggest|find|search|show|kiem ban|kiem nguoi yeu|co ai|ai do|crush|muon hen ho|muon tim hieu)\b/;
+  const explicitSearchRegex = /\b(tim|kiem|loc|goi y|de xuat|gioi thieu|match|mai moi|ket noi|recommend|suggest|find|search|show|kiem ban|kiem nguoi yeu|co ai|ai do|crush|muon hen ho|muon tim hieu|tim ban|tim nguoi)\b/;
   const moreResultsRegex = /\b(them|xem them|loc tiep|goi y tiep|nguoi khac|ho so khac|ket qua moi|khac nua|nua di|them nua|more|another|next)\b/;
-  
+
   if (explicitSearchRegex.test(text) || moreResultsRegex.test(text)) return true;
-  
+
   const lastAssistantMsg = conversation.filter(m => m.role === 'assistant').pop();
   if (lastAssistantMsg && /tìm|lọc|gợi ý|hồ sơ/i.test(lastAssistantMsg.text)) {
-      if (/\b(ok|duoc|ung ho|di|lam di|yes|co)\b/.test(text)) return true;
+    if (/\b(ok|duoc|ung ho|di|lam di|yes|co)\b/.test(text)) return true;
   }
   return false;
 }
@@ -342,19 +528,23 @@ function buildHeuristicIntent(prompt) {
   return { genders, minAge, maxAge, interests, cities, radiusKm: radiusMatch ? Number(radiusMatch[1]) : null };
 }
 
+// ============================================================
+// DB QUERY & RANKING
+// ============================================================
+
 async function loadCandidates(uid, viewer, intent) {
   const limit = DEFAULT_CANDIDATE_LIMIT;
   const usersRef = db.collection('users');
   const byId = new Map();
   const addSnap = (snap) => snap.docs.forEach(d => { if (d.id !== uid) byId.set(d.id, { id: d.id, ...d.data() }); });
-  
+
   const queries = [];
   if (intent.interests.length > 0) queries.push(usersRef.where('interests', 'array-contains-any', intent.interests.slice(0, 10)).limit(limit).get());
   if (intent.genders.length === 1) queries.push(usersRef.where('gender', '==', intent.genders[0]).limit(limit).get());
-  
+
   try { await Promise.all(queries.map(q => q.then(addSnap).catch(e => console.warn(e.message)))); } catch (_) {}
   if (byId.size < 80) { try { const snap = await usersRef.limit(limit).get(); addSnap(snap); } catch (_) {} }
-  
+
   return Array.from(byId.values()).filter(c => isDiscoverableCandidate(c, viewer, uid));
 }
 
@@ -378,7 +568,7 @@ function rankCandidates(candidates, viewer, intent, prompt, viewerLocation) {
     }
 
     const hits = intent.interests.filter(i => cInterests.some(ci => ci.includes(normalize(i))) || cText.includes(normalize(i)));
-    if (hits.length) { score += Math.min(28, hits.length * 9); reasons.push(`Cùng vibe ${hits.slice(0,2).join(', ')}`); }
+    if (hits.length) { score += Math.min(28, hits.length * 9); reasons.push(`Cùng vibe ${hits.slice(0, 2).join(', ')}`); }
 
     const dist = getDistanceKm(viewerLocation || normalizeLocation(viewer?.location), normalizeLocation(c?.location));
     if (dist !== null && dist <= (intent.radiusKm || 30)) { score += Math.max(4, 16 - dist / 3); reasons.push(`${Math.round(dist)}km gần bạn`); }
@@ -390,7 +580,10 @@ function rankCandidates(candidates, viewer, intent, prompt, viewerLocation) {
   }).filter(e => e.percent >= 35).sort((a, b) => b.percent - a.percent);
 }
 
-// --- Utils ---
+// ============================================================
+// UTILS
+// ============================================================
+
 function hasUnderageDatingRequest(text = '') {
   const t = normalize(text);
   if (/\b(?:duoi|nho hon|under)\s*(1[0-7]|18)\b/.test(t)) return true;
@@ -399,11 +592,11 @@ function hasUnderageDatingRequest(text = '') {
   if (!m) return false;
   return !(Number(m[1]) === 17 && /\b(?:tren|lon hon|over)\s*$/.test(t.slice(Math.max(0, m.index - 16), m.index)));
 }
-function normalize(v) { return String(v || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').trim(); }
-function normalizeGender(v) { const g = normalize(v); return ['female','f','nu','girl'].includes(g) ? 'female' : ['male','m','nam','boy'].includes(g) ? 'male' : ''; }
+function normalize(v) { return String(v || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/g, 'd').trim(); }
+function normalizeGender(v) { const g = normalize(v); return ['female', 'f', 'nu', 'girl'].includes(g) ? 'female' : ['male', 'm', 'nam', 'boy'].includes(g) ? 'male' : ''; }
 function normalizeStringArray(v) { return !v ? [] : (Array.isArray(v) ? v : [v]).map(i => String(i || '').trim()).filter(Boolean); }
 function normalizeLocation(v) { if (!v) return null; const lat = Number(v.latitude ?? v._latitude ?? v.lat), lng = Number(v.longitude ?? v._longitude ?? v.lng ?? v.lon); return (Number.isFinite(lat) && Number.isFinite(lng)) ? { latitude: lat, longitude: lng } : null; }
-function getDistanceKm(f, t) { if (!f || !t) return null; const R = 6371, dLat = (t.latitude-f.latitude)*Math.PI/180, dLon = (t.longitude-f.longitude)*Math.PI/180, a = Math.sin(dLat/2)**2 + Math.cos(f.latitude*Math.PI/180)*Math.cos(t.latitude*Math.PI/180)*Math.sin(dLon/2)**2; return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); }
+function getDistanceKm(f, t) { if (!f || !t) return null; const R = 6371, dLat = (t.latitude - f.latitude) * Math.PI / 180, dLon = (t.longitude - f.longitude) * Math.PI / 180, a = Math.sin(dLat / 2) ** 2 + Math.cos(f.latitude * Math.PI / 180) * Math.cos(t.latitude * Math.PI / 180) * Math.sin(dLon / 2) ** 2; return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)); }
 function getAgeNumber(v) { if (typeof v === 'number') return v; if (typeof v === 'string') { const n = Number(v); if (Number.isFinite(n)) return n; const d = new Date(v); if (!isNaN(d.getTime())) return ageFromDate(d); } if (v instanceof Date) return ageFromDate(v); if (v?.toDate) return ageFromDate(v.toDate()); return null; }
 function ageFromDate(d) { const n = new Date(); let y = n.getFullYear() - d.getFullYear(); if (n.getMonth() < d.getMonth() || (n.getMonth() === d.getMonth() && n.getDate() < d.getDate())) y--; return y > 0 ? y : null; }
 function isDiscoverableCandidate(c, viewer, uid) {
