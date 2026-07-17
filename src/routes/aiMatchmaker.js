@@ -241,8 +241,11 @@ async function callAiWithTools({ conversation, prompt, viewer }) {
     });
 
     if (!response.ok) {
-      // AI API failed — fall back to heuristic intent detection
-      console.warn('[AI_MATCHMAKER] AI API failed, falling back to heuristics');
+      // Try to read error body for diagnostics
+      let errBody = '';
+      try { errBody = await response.text(); } catch (_) { errBody = '[unable to read body]'; }
+      console.error(`[AI_MATCHMAKER] AI API failed (${response.status}): ${errBody.slice(0, 500)}`);
+      console.warn('[AI_MATCHMAKER] Falling back to regex heuristics');
       return fallbackToHeuristics({ conversation, prompt });
     }
 
@@ -433,7 +436,8 @@ function buildAiProviderList() {
 
 /**
  * Post a chat completion, trying each provider in order.
- * Falls back to the next provider on 401/403/auth errors.
+ * Falls back to the next provider on auth errors AND server/rate-limit errors.
+ * Only stops early on a successful response.
  */
 async function postAiChatCompletionWithFallback({ timeoutMs, payload }) {
   const providers = buildAiProviderList();
@@ -445,12 +449,16 @@ async function postAiChatCompletionWithFallback({ timeoutMs, payload }) {
 
   let lastResponse = null;
 
+  // Status codes worth retrying on another provider:
+  // 401/403 = bad API key, 429 = rate limited, 5xx = server error, 400 could be model-specific
+  const RETRYABLE_STATUSES = new Set([400, 401, 403, 429, 500, 502, 503, 504]);
+
   for (let i = 0; i < providers.length; i++) {
     const provider = providers[i];
     const model = process.env.AI_CHAT_MODEL || provider.model || 'deepseek-chat';
 
     if (i > 0) {
-      console.warn(`[AI_MATCHMAKER] Falling back to ${provider.label}...`);
+      console.warn(`[AI_MATCHMAKER] Falling back to ${provider.label} (model: ${model})...`);
     }
 
     const controller = new AbortController();
@@ -470,17 +478,31 @@ async function postAiChatCompletionWithFallback({ timeoutMs, payload }) {
 
       clearTimeout(timeout);
 
-      if (response.ok || (response.status !== 401 && response.status !== 403)) {
+      // Success — return immediately
+      if (response.ok) {
         return response;
       }
 
-      const errBody = await response.text();
-      console.error(`[AI_MATCHMAKER] ${provider.label} API Error: ${response.status} ${errBody}`);
-      lastResponse = response;
+      // Log the error
+      let errBody = '';
+      try { errBody = await response.text(); } catch (_) {}
+      console.error(`[AI_MATCHMAKER] ${provider.label} API ${response.status}: ${errBody.slice(0, 300)}`);
+
+      // Retry on next provider for retryable status codes
+      if (RETRYABLE_STATUSES.has(response.status) && i < providers.length - 1) {
+        console.warn(`[AI_MATCHMAKER] ${provider.label} failed with ${response.status}, trying next provider...`);
+        lastResponse = response;
+        continue;
+      }
+
+      // Non-retryable error (e.g. 404) — stop here
+      return response;
+
     } catch (error) {
       clearTimeout(timeout);
       console.error(`[AI_MATCHMAKER] ${provider.label} request failed:`, error.message);
       lastResponse = { ok: false, status: 0, _error: error.message };
+      // Try next provider
     }
   }
 
