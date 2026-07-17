@@ -412,23 +412,23 @@ function buildAiProviderList() {
     list.push({ label: 'AI_BASE_URL', baseUrl: aiBaseUrl, apiKey: aiApiKey, model: aiModel });
   }
 
-  // 2) DeepSeek
+  // 2) DeepSeek — ONLY use DeepSeek-specific models, never AI_MODEL (which may be an OpenRouter model)
   const dsKey = (process.env.DEEPSEEK_API_KEY || '').trim();
   if (dsKey) {
     const dsUrl = (process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1').trim().replace(/\/$/, '');
-    list.push({ label: 'DeepSeek', baseUrl: dsUrl, apiKey: dsKey, model: process.env.DEEPSEEK_MODEL || aiModel || 'deepseek-chat' });
+    list.push({ label: 'DeepSeek', baseUrl: dsUrl, apiKey: dsKey, model: (process.env.DEEPSEEK_MODEL || 'deepseek-chat').trim() });
   }
 
   // 3) OpenRouter
   const orKey = (process.env.OPENROUTER_API_KEY || '').trim();
   if (orKey) {
-    list.push({ label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', apiKey: orKey, model: aiModel || 'openai/gpt-4o-mini' });
+    list.push({ label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', apiKey: orKey, model: (process.env.OPENROUTER_MODEL || aiModel || 'openai/gpt-4o-mini').trim() });
   }
 
   // 4) OpenAI
   const oaiKey = (process.env.OPENAI_API_KEY || '').trim();
   if (oaiKey) {
-    list.push({ label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', apiKey: oaiKey, model: aiModel || 'gpt-4o-mini' });
+    list.push({ label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', apiKey: oaiKey, model: (process.env.OPENAI_MODEL || aiModel || 'gpt-4o-mini').trim() });
   }
 
   return list;
@@ -455,7 +455,9 @@ async function postAiChatCompletionWithFallback({ timeoutMs, payload }) {
 
   for (let i = 0; i < providers.length; i++) {
     const provider = providers[i];
-    const model = process.env.AI_CHAT_MODEL || provider.model || 'deepseek-chat';
+    // Use AI_CHAT_MODEL as global override if set, otherwise use the provider's own model
+    const chatModel = (process.env.AI_CHAT_MODEL || '').trim();
+    const model = chatModel || provider.model || 'deepseek-chat';
 
     if (i > 0) {
       console.warn(`[AI_MATCHMAKER] Falling back to ${provider.label} (model: ${model})...`);
