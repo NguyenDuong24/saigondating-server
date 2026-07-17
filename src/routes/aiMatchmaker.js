@@ -455,9 +455,9 @@ async function postAiChatCompletionWithFallback({ timeoutMs, payload }) {
 
   for (let i = 0; i < providers.length; i++) {
     const provider = providers[i];
-    // Use AI_CHAT_MODEL as global override if set, otherwise use the provider's own model
-    const chatModel = (process.env.AI_CHAT_MODEL || '').trim();
-    const model = chatModel || provider.model || 'deepseek-chat';
+    // Provider model takes priority (guaranteed valid for that provider).
+    // AI_CHAT_MODEL is only a fallback when provider has no model set.
+    const model = provider.model || (process.env.AI_CHAT_MODEL || '').trim() || 'deepseek-chat';
 
     if (i > 0) {
       console.warn(`[AI_MATCHMAKER] Falling back to ${provider.label} (model: ${model})...`);
