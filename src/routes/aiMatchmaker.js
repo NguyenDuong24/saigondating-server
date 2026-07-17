@@ -111,33 +111,25 @@ router.post('/search', async (req, res) => {
 
 // --- AI Text Generation ---
 async function composeAiChatMessage({ conversation, prompt, viewer }) {
-  const apiKey = process.env.AI_API_KEY || process.env.DEEPSEEK_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
   const fallback = "Xin lỗi, hệ thống kết nối tới AI đang hơi trục trặc. Bạn nhắn lại thử nhé!";
-  if (!apiKey) {
-    console.error('[AI_MATCHMAKER] Missing API Key in .env');
-    return fallback;
-  }
 
   try {
-    const baseUrl = getAiBaseUrl();
-    const model = process.env.AI_CHAT_MODEL || process.env.AI_MODEL || (baseUrl.includes('deepseek.com') ? 'deepseek-chat' : 'openai/gpt-4o-mini');
     const recentMessages = normalizeConversation(conversation).slice(-6).map(item => ({
       role: item.role,
       content: item.text.slice(0, 500)
     }));
 
-    const response = await postAiChatCompletion({
-      baseUrl, apiKey, timeoutMs: 15000,
+    const response = await postAiChatCompletionWithFallback({
+      timeoutMs: 15000,
       payload: {
-        model,
         temperature: 0.85,
         max_tokens: 300,
         messages: [
           {
             role: 'system',
-            content: `Bạn là một trợ lý AI ảo thông minh, duyên dáng, hài hước và hiểu biết. 
+            content: `Bạn là một trợ lý AI ảo thông minh, duyên dáng, hài hước và hiểu biết.
             Bạn đang hoạt động trong app hẹn hò ChappAt.
-            Bạn CÓ THỂ trò chuyện tự nhiên về BẤT KỲ chủ đề nào (khoa học, đời sống, tâm sự, triết lý, công nghệ) giống hệt ChatGPT. 
+            Bạn CÓ THỂ trò chuyện tự nhiên về BẤT KỲ chủ đề nào (khoa học, đời sống, tâm sự, triết lý, công nghệ) giống hệt ChatGPT.
             Hãy trả lời câu hỏi của người dùng một cách chân thành, thông minh và hữu ích.
             Không cần phải lúc nào cũng nói về hẹn hò. Chỉ khi người dùng muốn tìm người, bạn mới đóng vai trò Matchmaker.
             Trả lời ngắn gọn, tự nhiên, giống như nhắn tin với bạn bè.`
@@ -164,22 +156,17 @@ async function composeAiChatMessage({ conversation, prompt, viewer }) {
 }
 
 async function composeAiResultMessage({ conversation, prompt, viewer, matches }) {
-  const apiKey = process.env.AI_API_KEY || process.env.DEEPSEEK_API_KEY || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
   const fallback = matches.length > 0 ? `Mình tìm được ${matches.length} hồ sơ khá hợp gu. Bạn xem thử nhé!` : 'Mình chưa thấy ai thật sự hợp, thử đổi tiêu chí nhé.';
 
-  if (!apiKey) return fallback;
-
   try {
-    const baseUrl = getAiBaseUrl();
-    const model = process.env.AI_CHAT_MODEL || process.env.AI_MODEL || (baseUrl.includes('deepseek.com') ? 'deepseek-chat' : 'openai/gpt-4o-mini');
     const recentMessages = normalizeConversation(conversation).slice(-4).map(item => ({
       role: item.role, content: item.text.slice(0, 400)
     }));
 
-    const response = await postAiChatCompletion({
-      baseUrl, apiKey, timeoutMs: 10000,
+    const response = await postAiChatCompletionWithFallback({
+      timeoutMs: 10000,
       payload: {
-        model, temperature: 0.7, max_tokens: 150,
+        temperature: 0.7, max_tokens: 150,
         messages: [
           { role: 'system', content: 'Bạn là AI Matchmaker. Bạn vừa tìm được hồ sơ cho user. Hãy giới thiệu nhẹ nhàng, tự nhiên trong 1-2 câu.' },
           ...recentMessages,
@@ -198,19 +185,120 @@ async function composeAiResultMessage({ conversation, prompt, viewer, matches })
   }
 }
 
+/**
+ * Build a prioritized list of AI provider configs from env vars.
+ * Each entry: { label, baseUrl, apiKey, model }
+ * The caller tries them in order, falling back on 401/403/auth failures.
+ */
+function buildAiProviderList() {
+  const list = [];
+  const aiBaseUrl = (process.env.AI_BASE_URL || '').trim().replace(/\/$/, '');
+  const aiApiKey = (process.env.AI_API_KEY || '').trim();
+  const aiModel = (process.env.AI_MODEL || '').trim();
+
+  // 1) Explicit AI_BASE_URL (highest priority)
+  if (aiBaseUrl && aiApiKey) {
+    list.push({ label: 'AI_BASE_URL', baseUrl: aiBaseUrl, apiKey: aiApiKey, model: aiModel });
+  }
+
+  // 2) DeepSeek
+  const dsKey = (process.env.DEEPSEEK_API_KEY || '').trim();
+  if (dsKey) {
+    const dsUrl = (process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1').trim().replace(/\/$/, '');
+    list.push({ label: 'DeepSeek', baseUrl: dsUrl, apiKey: dsKey, model: process.env.DEEPSEEK_MODEL || aiModel || 'deepseek-chat' });
+  }
+
+  // 3) OpenRouter
+  const orKey = (process.env.OPENROUTER_API_KEY || '').trim();
+  if (orKey) {
+    list.push({ label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', apiKey: orKey, model: aiModel || 'openai/gpt-4o-mini' });
+  }
+
+  // 4) OpenAI
+  const oaiKey = (process.env.OPENAI_API_KEY || '').trim();
+  if (oaiKey) {
+    list.push({ label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', apiKey: oaiKey, model: aiModel || 'gpt-4o-mini' });
+  }
+
+  return list;
+}
+
+/**
+ * Post a chat completion, trying each provider in order.
+ * Falls back to the next provider on 401/403/auth errors.
+ * Returns the first successful response, or the last failed response.
+ */
+async function postAiChatCompletionWithFallback({ timeoutMs, payload }) {
+  const providers = buildAiProviderList();
+
+  if (providers.length === 0) {
+    console.error('[AI_MATCHMAKER] Missing API Key in .env');
+    return { ok: false, status: 0 };
+  }
+
+  let lastResponse = null;
+
+  for (let i = 0; i < providers.length; i++) {
+    const provider = providers[i];
+    const model = process.env.AI_CHAT_MODEL || provider.model || 'deepseek-chat';
+
+    if (i > 0) {
+      console.warn(`[AI_MATCHMAKER] Falling back to ${provider.label}...`);
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(`${provider.baseUrl}/chat/completions`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Authorization': `Bearer ${provider.apiKey}`,
+          'Content-Type': 'application/json',
+          ...(provider.baseUrl.includes('openrouter.ai') ? { 'HTTP-Referer': process.env.AI_HTTP_REFERER || 'https://chappat.com', 'X-Title': process.env.AI_APP_NAME || 'ChappAt' } : {})
+        },
+        body: JSON.stringify({ model, ...payload })
+      });
+
+      clearTimeout(timeout);
+
+      // If successful or non-auth error, return immediately
+      if (response.ok || (response.status !== 401 && response.status !== 403)) {
+        return response;
+      }
+
+      // Auth error – log and try next provider
+      const errBody = await response.text();
+      console.error(`[AI_MATCHMAKER] ${provider.label} API Error: ${response.status} ${errBody}`);
+      lastResponse = response;
+      // continue to next provider
+    } catch (error) {
+      clearTimeout(timeout);
+      console.error(`[AI_MATCHMAKER] ${provider.label} request failed:`, error.message);
+      lastResponse = { ok: false, status: 0, _error: error.message };
+      // continue to next provider
+    }
+  }
+
+  // All providers failed
+  return lastResponse || { ok: false, status: 0 };
+}
+
+// Legacy wrappers kept for backward compatibility
 async function postAiChatCompletion({ baseUrl, apiKey, timeoutMs, payload }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   return fetch(`${baseUrl}/chat/completions`, {
     method: 'POST', signal: controller.signal,
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', ...(baseUrl.includes('openrouter.ai') ? { 'HTTP-Referer': 'https://chappat.com', 'X-Title': 'ChappAt' } : {}) },
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', ...(baseUrl.includes('openrouter.ai') ? { 'HTTP-Referer': process.env.AI_HTTP_REFERER || 'https://chappat.com', 'X-Title': process.env.AI_APP_NAME || 'ChappAt' } : {}) },
     body: JSON.stringify(payload)
   }).finally(() => clearTimeout(timeout));
 }
 
 function getAiBaseUrl() {
   if (process.env.AI_BASE_URL) return process.env.AI_BASE_URL.replace(/\/$/, '');
-  if (process.env.DEEPSEEK_API_KEY) return 'https://api.deepseek.com/v1';
+  if (process.env.DEEPSEEK_API_KEY) return (process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1').replace(/\/$/, '');
   if (process.env.OPENROUTER_API_KEY) return 'https://openrouter.ai/api/v1';
   if (process.env.OPENAI_API_KEY) return 'https://api.openai.com/v1';
   return '';
