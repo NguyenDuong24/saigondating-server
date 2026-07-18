@@ -34,7 +34,7 @@ const CITY_ALIASES = [
   { value: 'Da Nang', terms: ['da nang', 'danang', 'hai chau', 'son tra'] },
 ];
 
-const ADULT_ONLY_MATCHMAKER_MESSAGE = 'Để an toàn, ChappAt chỉ gợi ý hồ sơ từ 18 tuổi trở lên. Bạn chọn một khoảng tuổi 18+ nhé.';
+const ADULT_ONLY_MATCHMAKER_MESSAGE = 'Để an toàn, SaiGon Match chỉ gợi ý hồ sơ từ 18 tuổi trở lên. Bạn chọn một khoảng tuổi 18+ nhé.';
 
 /* Rate Limiting & Dedup */
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -58,7 +58,7 @@ const SEARCH_PROFILES_TOOL = {
   function: {
     name: 'search_profiles',
     description:
-      'Tìm kiếm hồ sơ người dùng trong database ChappAt. ' +
+      'Tìm kiếm hồ sơ người dùng trong database SaiGon Match. ' +
       'CHỈ gọi function này khi user RÕ RÀNG muốn tìm người để hẹn hò / làm quen / kết bạn ' +
       'VÀ đã cung cấp ÍT NHẤT 2 tiêu chí cụ thể (ví dụ: giới tính + tuổi, giới tính + thành phố, giới tính + sở thích). ' +
       'Nếu user chỉ có 1 tiêu chí hoặc tiêu chí mơ hồ, ĐỪNG gọi tool — thay vào đó hãy hỏi thêm để làm rõ. ' +
@@ -110,7 +110,7 @@ const SEARCH_PROFILES_TOOL = {
 function buildSystemPrompt(viewer) {
   const viewerName = viewer?.displayName || viewer?.username || 'bạn';
   return [
-    `Bạn là trợ lý AI thông minh, duyên dáng của ChappAt — app hẹn hò dành cho người Việt.`,
+    `Bạn là trợ lý AI thông minh, duyên dáng của SaiGon Match — app hẹn hò dành cho người Việt.`,
     ``,
     `TÍNH CÁCH:`,
     `- Trò chuyện tự nhiên, hài hước, ấm áp như bạn thân nhắn tin`,
@@ -317,7 +317,7 @@ async function composeResultIntro({ conversation, matches }) {
       payload: {
         temperature: 0.7, max_tokens: 150,
         messages: [
-          { role: 'system', content: 'Bạn là AI Matchmaker của ChappAt. Bạn vừa tìm được hồ sơ cho user. Hãy giới thiệu nhẹ nhàng, tự nhiên trong 1-2 câu. Không bịa thông tin.' },
+          { role: 'system', content: 'Bạn là AI Matchmaker của SaiGon Match. Bạn vừa tìm được hồ sơ cho user. Hãy giới thiệu nhẹ nhàng, tự nhiên trong 1-2 câu. Không bịa thông tin.' },
           ...recentMessages,
           { role: 'user', content: JSON.stringify({ task: 'introduce_matches', count: matches.length, topReasons: [...new Set(matches.flatMap(m => m.matchReasons || []))].slice(0, 3) }) }
         ]
@@ -473,7 +473,8 @@ async function postAiChatCompletionWithFallback({ timeoutMs, payload }) {
         headers: {
           'Authorization': `Bearer ${provider.apiKey}`,
           'Content-Type': 'application/json',
-          ...(provider.baseUrl.includes('openrouter.ai') ? { 'HTTP-Referer': process.env.AI_HTTP_REFERER || 'https://chappat.com', 'X-Title': process.env.AI_APP_NAME || 'ChappAt' } : {})
+          // FIX: Đổi link HTTP-Referer thành SaiGon Match
+          ...(provider.baseUrl.includes('openrouter.ai') ? { 'HTTP-Referer': process.env.AI_HTTP_REFERER || 'https://saigonmatch.com', 'X-Title': process.env.AI_APP_NAME || 'SaiGon Match' } : {})
         },
         body: JSON.stringify({ model, ...payload })
       });
@@ -631,7 +632,7 @@ function isDiscoverableCandidate(c, viewer, uid) {
   return Boolean(c.username && c.gender && (c.profileUrl || c.photoURL));
 }
 function toPublicUser(u) {
-  return { id: u.id || u.uid, uid: u.uid || u.id, username: u.username || 'ChappAt user', displayName: u.displayName || u.username || '', age: getAgeNumber(u.age) || null, gender: normalizeGender(u.gender) || null, profileUrl: u.profileUrl || '', photoURL: u.photoURL || '', avatarUrl: u.avatarUrl || '', bio: u.bio || '', job: u.job || '', city: u.city || '', interests: normalizeStringArray(u.interests).slice(0, 12), isOnline: Boolean(u.isOnline), location: normalizeLocation(u.location) };
+  return { id: u.id || u.uid, uid: u.uid || u.id, username: u.username || 'SaiGon Match user', displayName: u.displayName || u.username || '', age: getAgeNumber(u.age) || null, gender: normalizeGender(u.gender) || null, profileUrl: u.profileUrl || '', photoURL: u.photoURL || '', avatarUrl: u.avatarUrl || '', bio: u.bio || '', job: u.job || '', city: u.city || '', interests: normalizeStringArray(u.interests).slice(0, 12), isOnline: Boolean(u.isOnline), location: normalizeLocation(u.location) };
 }
 function normalizeConversation(v) { return Array.isArray(v) ? v.slice(-8).map(i => ({ role: i?.role === 'assistant' ? 'assistant' : 'user', text: String(i?.text || i?.content || '').trim() })).filter(i => i.text) : []; }
 
