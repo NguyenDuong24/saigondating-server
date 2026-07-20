@@ -101,6 +101,7 @@ const momoRoutes = require('./routes/momo');
 const vietqrRoutes = require('./routes/vietqr');
 const iapRoutes = require('./routes/iap');
 const adminRoutes = require('./routes/admin');
+const adminManagementRoutes = require('./routes/adminManagement');
 const aiMatchmakerRoutes = require('./routes/aiMatchmaker');
 
 // Import middlewares
@@ -122,6 +123,7 @@ app.use('/api/ai-matchmaker', aiMatchmakerRoutes);
 
 // Admin routes (protected with both auth and admin check)
 app.use('/api/admin', authMiddleware, adminAuth, adminRoutes);
+app.use('/api/admin/management', authMiddleware, adminAuth, adminManagementRoutes);
 
 // Health check endpoint
 app.get('/health', async (req, res) => {
