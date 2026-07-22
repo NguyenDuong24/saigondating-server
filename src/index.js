@@ -125,27 +125,13 @@ app.use('/api/ai-matchmaker', aiMatchmakerRoutes);
 app.use('/api/admin', authMiddleware, adminAuth, adminRoutes);
 app.use('/api/admin/management', authMiddleware, adminAuth, adminManagementRoutes);
 
-// Health check endpoint
-app.get('/health', async (req, res) => {
-  let fetchTest = 'not run';
-  try {
-    if (typeof fetch !== 'undefined') {
-      const resp = await fetch('https://api.videosdk.live/v2/rooms', { method: 'OPTIONS' });
-      fetchTest = `ok: ${resp.status}`;
-    } else {
-      fetchTest = 'undefined';
-    }
-  } catch (e) {
-    fetchTest = `error: ${e.message}`;
-  }
-
+// Health check endpoint - optimized for monitoring
+// No authentication, no database, no external calls
+app.get('/health', (req, res) => {
   res.status(200).json({
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    nodeVersion: process.version,
-    memoryUsage: process.memoryUsage(),
-    fetchTest
+    status: 'ok',
+    service: 'saigon-match-api',
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -158,7 +144,7 @@ app.use('*', (req, res) => {
 });
 
 // Error handling middleware
-app.use((err, req, res, next) => {
+app.use((err, req, res, _next) => {
   console.error('[GLOBAL ERROR]', err.stack);
   res.status(500).json({
     error: 'Something went wrong!',
