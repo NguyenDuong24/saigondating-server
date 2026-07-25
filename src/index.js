@@ -155,9 +155,53 @@ app.use((err, req, res, _next) => {
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`ðŸš€ Saigon Dating Server is running on port ${PORT}`);
-  console.log(`ðŸ“Š Health check available at http://localhost:${PORT}/health`);
-  console.log(`ðŸ”— API available at http://localhost:${PORT}/api`);
+  console.log(`🚀 Saigon Dating Server is running on port ${PORT}`);
+  console.log(`📊 Health check available at http://localhost:${PORT}/health`);
+  console.log(`🌐 API available at http://localhost:${PORT}/api`);
 });
+
+// ─── Stale Online Status Cleanup ────────────────────────────
+// When users force-kill the app, they can't update isOnline to false.
+// This cron job detects stale online users and marks them offline.
+// Heartbeat (client): writes lastActive every 60s while in foreground.
+// Stale threshold: 3 minutes without heartbeat → considered offline.
+
+const STALE_CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // Every 5 minutes
+const STALE_THRESHOLD_MS = 3 * 60 * 1000;        // 3 minutes without heartbeat
+
+async function cleanupStaleOnlineUsers() {
+  try {
+    const cutoff = new Date(Date.now() - STALE_THRESHOLD_MS);
+    const usersRef = admin.firestore().collection('users');
+    const snapshot = await usersRef
+      .where('isOnline', '==', true)
+      .where('lastActive', '<', cutoff)
+      .limit(500)
+      .get();
+
+    if (snapshot.empty) return;
+
+    const batch = admin.firestore().batch();
+    const now = new Date();
+    snapshot.forEach(doc => {
+      // Defensive: double-check isOnline is still true (could have been updated since query)
+      if (doc.data()?.isOnline === true) {
+        batch.update(doc.ref, {
+          isOnline: false,
+          lastActive: admin.firestore.Timestamp.fromDate(now),
+        });
+      }
+    });
+
+    await batch.commit();
+    console.log(`🧹 [Presence Cleanup] Marked ${snapshot.size} stale users offline`);
+  } catch (error) {
+    console.error('🧹 [Presence Cleanup] Error:', error.message);
+  }
+}
+
+// Run immediately on startup, then on interval
+cleanupStaleOnlineUsers();
+setInterval(cleanupStaleOnlineUsers, STALE_CLEANUP_INTERVAL_MS);
 
 module.exports = app;
