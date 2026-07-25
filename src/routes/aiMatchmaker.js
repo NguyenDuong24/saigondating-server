@@ -412,17 +412,19 @@ function buildAiProviderList() {
     list.push({ label: 'AI_BASE_URL', baseUrl: aiBaseUrl, apiKey: aiApiKey, model: aiModel });
   }
 
-  // 2) DeepSeek — ONLY use DeepSeek-specific models, never AI_MODEL (which may be an OpenRouter model)
+  // 2) OpenRouter (primary - non-reasoning models, stable)
+  const orKey = (process.env.OPENROUTER_API_KEY || '').trim();
+  if (orKey) {
+    const orModel = (process.env.OPENROUTER_MODEL || '').trim() || aiModel || 'google/gemini-2.0-flash-001';
+    list.push({ label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', apiKey: orKey, model: orModel });
+  }
+
+  // 3) DeepSeek (fallback - reasoning model needs high max_tokens)
   const dsKey = (process.env.DEEPSEEK_API_KEY || '').trim();
   if (dsKey) {
     const dsUrl = (process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1').trim().replace(/\/$/, '');
-    list.push({ label: 'DeepSeek', baseUrl: dsUrl, apiKey: dsKey, model: (process.env.DEEPSEEK_MODEL || 'deepseek-chat').trim() });
-  }
-
-  // 3) OpenRouter
-  const orKey = (process.env.OPENROUTER_API_KEY || '').trim();
-  if (orKey) {
-    list.push({ label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', apiKey: orKey, model: (process.env.OPENROUTER_MODEL || aiModel || 'openai/gpt-4o-mini').trim() });
+    const dsModel = (process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash').trim();
+    list.push({ label: 'DeepSeek', baseUrl: dsUrl, apiKey: dsKey, model: dsModel });
   }
 
   // 4) OpenAI
