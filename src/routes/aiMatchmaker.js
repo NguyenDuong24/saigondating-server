@@ -417,7 +417,9 @@ function buildAiProviderList() {
   if (dsKey) {
     const dsUrl = (process.env.DEEPSEEK_API_URL || 'https://api.deepseek.com/v1').trim().replace(/\/$/, '');
     const dsModel = (process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash').trim();
-    list.push({ label: 'DeepSeek', baseUrl: dsUrl, apiKey: dsKey, model: dsModel });
+    // Force v4 model - deepseek-chat is deprecated
+    const finalDsModel = dsModel === 'deepseek-chat' ? 'deepseek-v4-flash' : dsModel;
+    list.push({ label: 'DeepSeek', baseUrl: dsUrl, apiKey: dsKey, model: finalDsModel });
   }
 
   // 3) OpenRouter (fallback)
