@@ -229,7 +229,7 @@ async function callAiWithTools({ conversation, prompt, viewer }) {
       timeoutMs: 20000,
       payload: {
         temperature: 0.85,
-        max_tokens: 400,
+        max_tokens: 4000,
         tools: [SEARCH_PROFILES_TOOL],
         tool_choice: 'auto',
         messages: [
@@ -315,7 +315,7 @@ async function composeResultIntro({ conversation, matches }) {
     const response = await postAiChatCompletionWithFallback({
       timeoutMs: 10000,
       payload: {
-        temperature: 0.7, max_tokens: 150,
+        temperature: 0.7, max_tokens: 4000,
         messages: [
           { role: 'system', content: 'Bạn là AI Matchmaker của SaiGon Match. Bạn vừa tìm được hồ sơ cho user. Hãy giới thiệu nhẹ nhàng, tự nhiên trong 1-2 câu. Không bịa thông tin.' },
           ...recentMessages,
