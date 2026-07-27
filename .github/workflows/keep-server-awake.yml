@@ -1,19 +1,21 @@
 name: Keep Render Server Awake
 
 on:
-  # Chạy mỗi 10 phút (Render free tier sleep sau 15 phút không hoạt động)
+  # GitHub Actions cron tối thiểu là 5 phút
+  # Dùng loop bên trong job để ping mỗi 1 phút trong suốt 5 phút
   schedule:
-    - cron: '*/10 * * * *'
-  
+    - cron: '*/5 * * * *'
+
   # Cho phép chạy thủ công từ GitHub UI
   workflow_dispatch:
 
 jobs:
   ping:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 6
+
     steps:
-      - name: Ping health endpoint
+      - name: Ping every minute for 5 minutes
         env:
           RENDER_SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
         run: |
@@ -23,23 +25,30 @@ jobs:
             echo "Ví dụ: https://saigon-match-api.onrender.com"
             exit 1
           fi
-          
-          echo "🔔 Pinging Render server: ${RENDER_SERVICE_URL}/health"
-          echo "⏰ Thời gian: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
-          
-          # Gửi request đến endpoint health
-          response=$(curl -s -w "\n%{http_code}" "${RENDER_SERVICE_URL}/health")
-          http_code=$(echo "$response" | tail -n 1)
-          body=$(echo "$response" | head -n -1)
-          
-          echo "📊 HTTP Status: $http_code"
-          echo "📦 Response: $body"
-          
-          if [ "$http_code" = "200" ]; then
-            echo "✅ Server đang hoạt động tốt!"
-            exit 0
-          else
-            echo "⚠️ Server trả về status code: $http_code"
-            echo "Server có thể đang wake up từ sleep mode..."
-            exit 0
-          fi
+
+          # Ping 5 lần, mỗi lần cách nhau 60 giây → hiệu quả ping mỗi 1 phút
+          for i in 1 2 3 4 5; do
+            echo "────────────────────────────────────"
+            echo "🔔 Ping #${i}/5 — $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            
+            response=$(curl -s -w "\n%{http_code}" --max-time 10 "${RENDER_SERVICE_URL}/health")
+            http_code=$(echo "$response" | tail -n 1)
+            body=$(echo "$response" | head -n -1)
+
+            echo "📊 HTTP Status : $http_code"
+            echo "📦 Response    : $body"
+
+            if [ "$http_code" = "200" ]; then
+              echo "✅ OK"
+            else
+              echo "⚠️  Status $http_code — server có thể đang wake up..."
+            fi
+
+            # Chờ 60 giây trước lần ping tiếp theo (bỏ qua lần cuối)
+            if [ "$i" -lt 5 ]; then
+              sleep 60
+            fi
+          done
+
+          echo "────────────────────────────────────"
+          echo "🏁 Hoàn thành 5 lần ping."
